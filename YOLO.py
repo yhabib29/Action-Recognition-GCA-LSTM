@@ -7,10 +7,9 @@ import numpy as np
 import tensorflow as tf
 from pycocotools.coco import COCO
 
-
-#------------------------
+# ------------------------
 #   HYPERPARAMETERS
-#------------------------
+# ------------------------
 
 WIDTH = 608
 HEIGHT = 608
@@ -21,12 +20,13 @@ GRID_WIDTH = 7
 GRID_HEIGHT = 7
 LEAKY = 0.1
 
-#!TODO: One-hot-encoding
+# !TODO: One-hot-encoding
 CLASS = 80
 
-#------------------------
+
+# ------------------------
 #          DATA
-#------------------------
+# ------------------------
 
 
 # Load data from Coco dataset
@@ -42,8 +42,8 @@ def load_data():
     imgIds = coco.getImgIds()
     random.shuffle(imgIds)
 
-    #print(coco.loadImgs([imgIds[0]]))
-    #print(coco.loadAnns([annIds[0]]))
+    # print(coco.loadImgs([imgIds[0]]))
+    # print(coco.loadAnns([annIds[0]]))
 
     # Collect images IDs and filenames
     print("Loading Images")
@@ -81,8 +81,8 @@ def fill_feed_dict(images_pl, labels_pl, nb_images):
         labels_feed.append(lbls)
     images_feed = tf.image.resize_images(images_feed, (WIDTH, HEIGHT))
     feed_dict = {
-        images_pl : images_feed,
-        labels_pl : labels_feed,
+        images_pl: images_feed,
+        labels_pl: labels_feed,
     }
     return feed_dict
 
@@ -111,15 +111,15 @@ def read_and_decode(filename_queue):
                'objects_number': tf.FixedLenFeature([], tf.int64),
                'class': tf.VarLenFeature(tf.int64),
                'bboxes': tf.VarLenFeature(tf.float32)}
-    features = tf.parse_single_example(serialized_example,features=feature)
+    features = tf.parse_single_example(serialized_example, features=feature)
 
     # Convert from a scalar string tensor
     # image = tf.decode_raw(features['image/encoded'], tf.uint8)
-    #image = cv2.imdecode(features['image'], 3)
+    # image = cv2.imdecode(features['image'], 3)
     # image = tf.decode_raw(features['image'], tf.uint8)
     image = tf.image.decode_jpeg(features['image'], 3)
     bboxes = tf.sparse_tensor_to_dense(features['bboxes'], default_value=0)
-    labels = tf.sparse_tensor_to_dense(features['class'], default_value=0) #tf.decode_raw
+    labels = tf.sparse_tensor_to_dense(features['class'], default_value=0)  # tf.decode_raw
     height = tf.cast(features['height'], tf.int32)
     width = tf.cast(features['width'], tf.int32)
     nb_objects = tf.cast(features['objects_number'], tf.int32)
@@ -127,7 +127,7 @@ def read_and_decode(filename_queue):
 
     image_shape = tf.stack([height, width, 3])
     bboxes_shape = tf.stack([nb_objects, 4])
-    label_shape = tf.stack([nb_objects])    # ,1)
+    label_shape = tf.stack([nb_objects])  # ,1)
 
     image = tf.reshape(image, [height, width, 3])
     bboxes = tf.cond(is_object,
@@ -157,10 +157,10 @@ def _parse_(serialized_example):
                'objects_number': tf.FixedLenFeature([], tf.int64),
                'class': tf.VarLenFeature(tf.int64),
                'bboxes': tf.VarLenFeature(tf.float32)}
-    features = tf.parse_single_example(serialized_example,feature)
+    features = tf.parse_single_example(serialized_example, feature)
     image = tf.image.decode_jpeg(features['image'], 3)
     bboxes = tf.sparse_tensor_to_dense(features['bboxes'], default_value=0)
-    labels = tf.sparse_tensor_to_dense(features['class'], default_value=0) #tf.decode_raw
+    labels = tf.sparse_tensor_to_dense(features['class'], default_value=0)  # tf.decode_raw
     height = tf.cast(features['height'], tf.int32)
     width = tf.cast(features['width'], tf.int32)
     nb_objects = tf.cast(features['objects_number'], tf.int32)
@@ -168,7 +168,7 @@ def _parse_(serialized_example):
 
     image_shape = tf.stack([height, width, 3])
     bboxes_shape = tf.stack([nb_objects, 4])
-    label_shape = tf.stack([nb_objects])    # ,1)
+    label_shape = tf.stack([nb_objects])  # ,1)
 
     image = tf.reshape(image, [height, width, 3])
     bboxes = tf.cond(is_object,
@@ -193,13 +193,79 @@ def tfrecord_train_input_fn(tfrecord_path):
 
     return tfrecord_iterator.get_next()
 
-#------------------------
+
+# ------------------------
 #       NETWORK
-#------------------------
+# ------------------------
 
 # YOLO weights (filters + bias)
 def variables_yolo():
-    return
+    variables = {}
+    W = []
+    B = []
+
+    # Block 1
+    W[0] = tf.Variable(tf.truncated_normal([3, 3, 3, 32], stddev=0.1))
+    B[0] = tf.Variable(tf.zeros([32]))
+    W[1] = tf.Variable(tf.truncated_normal([3, 3, 32, 64], stddev=0.1))
+    B[1] = tf.Variable(tf.zeros([64]))
+    W[2] = tf.Variable(tf.truncated_normal([3, 3, 64, 128], stddev=0.1))
+    B[2] = tf.Variable(tf.zeros([128]))
+    W[3] = tf.Variable(tf.truncated_normal([1, 1, 128, 64], stddev=0.1))
+    B[3] = tf.Variable(tf.zeros([64]))
+    W[4] = tf.Variable(tf.truncated_normal([3, 3, 64, 128], stddev=0.1))
+    B[4] = tf.Variable(tf.zeros([128]))
+
+    # Block 2
+    W[5] = tf.Variable(tf.truncated_normal([3, 3, 128, 256], stddev=0.1))
+    B[5] = tf.Variable(tf.zeros([256]))
+    W[6] = tf.Variable(tf.truncated_normal([1, 1, 256, 128], stddev=0.1))
+    B[6] = tf.Variable(tf.zeros([128]))
+    W[7] = tf.Variable(tf.truncated_normal([3, 3, 128, 256], stddev=0.1))
+    B[7] = tf.Variable(tf.zeros([256]))
+
+    # Block 3
+    W[8] = tf.Variable(tf.truncated_normal([3, 3, 256, 512], stddev=0.1))
+    B[8] = tf.Variable(tf.zeros([512]))
+    W[9] = tf.Variable(tf.truncated_normal([1, 1, 512, 256], stddev=0.1))
+    B[9] = tf.Variable(tf.zeros([256]))
+    W[10] = tf.Variable(tf.truncated_normal([3, 3, 256, 512], stddev=0.1))
+    B[10] = tf.Variable(tf.zeros([512]))
+    W[11] = tf.Variable(tf.truncated_normal([1, 1, 512, 256], stddev=0.1))
+    B[11] = tf.Variable(tf.zeros([256]))
+    W[12] = tf.Variable(tf.truncated_normal([3, 3, 256, 512], stddev=0.1))
+    B[12] = tf.Variable(tf.zeros([512]))
+
+    # Block 4
+    W[13] = tf.Variable(tf.truncated_normal([3, 3, 512, 1024], stddev=0.1))
+    B[13] = tf.Variable(tf.zeros([1024]))
+    W[14] = tf.Variable(tf.truncated_normal([1, 1, 1024, 512], stddev=0.1))
+    B[14] = tf.Variable(tf.zeros([512]))
+    W[15] = tf.Variable(tf.truncated_normal([3, 3, 512, 1024], stddev=0.1))
+    B[15] = tf.Variable(tf.zeros([1024]))
+    W[16] = tf.Variable(tf.truncated_normal([1, 1, 1024, 512], stddev=0.1))
+    B[16] = tf.Variable(tf.zeros([512]))
+    W[17] = tf.Variable(tf.truncated_normal([3, 3, 512, 1024], stddev=0.1))
+    B[17] = tf.Variable(tf.zeros([1024]))
+    W[18] = tf.Variable(tf.truncated_normal([3, 3, 1024, 1024], stddev=0.1))
+    B[18] = tf.Variable(tf.zeros([1024]))
+    W[19] = tf.Variable(tf.truncated_normal([3, 3, 1024, 1024], stddev=0.1))
+    B[19] = tf.Variable(tf.zeros([1024]))
+
+    # Block 5
+    W[20] = tf.Variable(tf.truncated_normal([1, 1, 512, 64], stddev=0.1))
+    B[20] = tf.Variable(tf.zeros([64]))
+    W[21] = tf.Variable(tf.truncated_normal([3, 3, 1280, 1024], stddev=0.1))
+    B[21] = tf.Variable(tf.zeros([1024]))
+    W[22] = tf.Variable(tf.truncated_normal([1, 1, 1024, 425], stddev=0.1))
+    B[22] = tf.Variable(tf.zeros([425]))
+
+    for wk in range(len(W)):
+        wk_name = "w" + str(wk)
+        bk_name = "b" + str(wk)
+        variables[wk_name] = W[wk]
+        variables[bk_name] = B[wk]
+    return variables
 
 
 def conv(x, kernel, bias, stride, name, pad="SAME"):
@@ -214,7 +280,7 @@ def conv(x, kernel, bias, stride, name, pad="SAME"):
     :return:            Activation of the output of the convolution
     """
     with tf.name_scope(name):
-        xW = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1],padding=pad)
+        xW = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1], padding=pad)
         z = tf.nn.bias_add(xW, bias)
         a = tf.nn.leaky_relu(z, LEAKY)
     return (a)
@@ -237,13 +303,24 @@ def loss():
     return
 
 
-def yolo(input_data):
+def yolo(data, vars):
+
+    # Conv1
+    conv1 = conv(data, vars["w1"], vars["b1"], 1, "conv1")
+    pool1 = maxpool(conv1, 2, 2, "pool1")           # Pooling
+    bn1 = tf.contrib.layers.batch_norm(pool1)       # Batch Normalisation
+
+    # Conv1
+    conv1 = conv(data, vars["w1"], vars["b1"], 1, "conv1")
+    pool1 = maxpool(conv1, 2, 2, "pool1")           # Pooling
+    bn1 = tf.contrib.layers.batch_norm(pool1)       # Batch Normalisation
+
     return
 
 
-#------------------------
+# ------------------------
 #          TRAIN
-#------------------------
+# ------------------------
 
 
 """
@@ -287,7 +364,6 @@ with tf.Session() as sess:
     #                                        min_after_dequeue=10)
 """
 
-
 # Collect data path (images and labels filepath)
 # data_lbl = {}
 # data_img = {}
@@ -295,16 +371,15 @@ with tf.Session() as sess:
 #
 # print("Images: ", nb_images)
 # print("Labels: ", nb_labels)
-#images = coco.loadImgs(imgIds[0:3])
-#labels = coco.loadAnns(annIds[0:3])
-#images = coco.loadImgs(imgIds[np.random.randint(0, len(imgIds), size=batch_size)])
-#print(len(images))
-#print(labels[0])
-#imtest_path = dataDir + '/' + dataType + '/' + images[0]['file_name']
-#imtest = cv2.imread(imtest_path)
-#cv2.imwrite("test/Test.jpg", imtest)
-#print(imtest.shape)
-
+# images = coco.loadImgs(imgIds[0:3])
+# labels = coco.loadAnns(annIds[0:3])
+# images = coco.loadImgs(imgIds[np.random.randint(0, len(imgIds), size=batch_size)])
+# print(len(images))
+# print(labels[0])
+# imtest_path = dataDir + '/' + dataType + '/' + images[0]['file_name']
+# imtest = cv2.imread(imtest_path)
+# cv2.imwrite("test/Test.jpg", imtest)
+# print(imtest.shape)
 
 
 # Initialize placeholders
@@ -327,7 +402,7 @@ tfrecord_dataset = tf.data.TFRecordDataset(valid_dataset)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
 # tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
-pad_shapes = ([None, None, 3],[1],[1],[1],[None],[None,4])
+pad_shapes = ([None, None, 3], [1], [1], [1], [None], [None, 4])
 tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
@@ -335,6 +410,9 @@ next_element = tfrecord_iterator.get_next()
 # Add the variable initializer Op.
 init_op = tf.group(tf.global_variables_initializer(),
                    tf.local_variables_initializer())
+
+# Weights initializer
+w_init = tf.contrib.layers.xavier_initializer()
 
 # Create a saver for writing training checkpoints.
 # weights_file = "yolo.weights"
@@ -355,17 +433,16 @@ imgs, H, W, NO, lbls, bbs = sess.run(next_element)
 for i in range(1):
     print('Current batch')
     img, lbl, bbox, nbo = imgs[5], lbls[5], bbs[5], NO[5]
-    #img, lbl, bbox, nbo = sess.run([image, label, bboxes, nb_objects])
+    # img, lbl, bbox, nbo = sess.run([image, label, bboxes, nb_objects])
     for bb in bbox:
         x, y = bb[0], bb[1]
         w, h = bb[2], bb[3]
         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
     # cv2.imwrite("test/img.jpg", img)
-    plt.imsave("test/img.jpg",img)
-
+    plt.imsave("test/img.jpg", img)
 
 # Intialize iterator with training data
-#sess.run(iterator.initializer, feed_dict={filenames: train_dataset})
+# sess.run(iterator.initializer, feed_dict={filenames: train_dataset})
 
 coord.request_stop()
 coord.join(threads)
