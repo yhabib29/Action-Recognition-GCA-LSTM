@@ -13,16 +13,104 @@ from pycocotools.coco import COCO
 
 WIDTH = 608
 HEIGHT = 608
+assert WIDTH % 32 == 0, 'Network input size should be mutliple of 32.'
+assert HEIGHT % 32 == 0, 'Network input size should be mutliple of 32.'
 DEPTH = 3
 CHANNELS = 3
-BATCH_SIZE = 4
-ANCHORS = 5
-GRID_WIDTH = 7
-GRID_HEIGHT = 7
+BATCH_SIZE = 1
+NB_ANCHORS = 5
+GRID_WIDTH = WIDTH // 32
+GRID_HEIGHT = HEIGHT // 32
 LEAKY = 0.1
+LCOORD = 5
+LNOOBJ = 1
+ANCHORS = np.array(
+    [[0.57273, 0.677385], [1.87446, 2.06253], [3.33843, 5.47434], [7.88282, 3.52778], [9.77052, 9.16828]])
 
 # !TODO: One-hot-encoding
 CLASSES = 80
+# Coco class IDs
+CLASSES_ID = [c for c in range(1, 91) if c not in [12, 26, 29, 30, 45, 66, 68, 69, 71, 83]]
+
+
+# ------------------------
+#       TOOLS
+# ------------------------
+
+
+def iou(box1, box2):
+    # Calculate the (y1, x1, y2, x2) coordinates of the intersection of box1 and box2. Calculate its Area.
+    xi1 = max(box1[0], box2[0])
+    yi1 = max(box1[1], box2[1])
+    xi2 = min(box1[2], box2[2])
+    yi2 = min(box1[3], box2[3])
+    inter_area = (xi2 - xi1) * (yi2 - yi1)
+
+    # Union(A,B) = A + B - Inter(A,B)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union_area = box1_area + box2_area - inter_area
+
+    # compute the IoU
+    iou = inter_area / union_area
+
+    return iou
+
+
+def yolo_ground_truth(batch_true_boxes, num_objects):
+    """
+    Function adapted from https://github.com/allanzelener/YAD2K/blob/master/yad2k/models/keras_yolo.py
+    Convert ground truth annotation into yolo format
+    :param true_boxes:  Original bounding boxes (np.array)
+    :return: detection_map, gt_yolo_map
+    """
+    box_dim = batch_true_boxes.shape[2]
+    detection_mask = np.zeros((BATCH_SIZE, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 1),
+                              dtype=np.float32)
+    gt_yolo_map = np.zeros((BATCH_SIZE, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, box_dim),
+                           dtype=np.float32)
+    for ba, true_boxes in enumerate(batch_true_boxes):
+        num_object = int(num_objects[ba])
+        for nb in range(num_object):
+            box = true_boxes[nb]
+            # print("BOX", box)
+            # !TODO Convert Category_ID into Class_ID for one-hot encoding
+            category_id, box = int(box[0]), box[1:]
+            class_id = CLASSES_ID.index(category_id)
+            best_iou = 0
+            best_anchor = 0
+            box = box[0:4] * np.array([GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT,
+                                       GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT])
+            cx = int(box[0]) if (box[0] < GRID_WIDTH) else (GRID_WIDTH - 1)
+            cy = int(box[1]) if (box[1] < GRID_HEIGHT) else (GRID_HEIGHT - 1)
+            for k, anchor in enumerate(ANCHORS):
+                box_maxes = box[2:4] / 2.0
+                box_mins = - box_maxes
+                abox_maxes = (anchor / 2.0)
+                abox_mins = - abox_maxes
+
+                intersect_mins = np.maximum(box_mins, abox_mins)
+                intersect_maxes = np.minimum(box_maxes, abox_maxes)
+                intersect_wh = np.maximum(intersect_maxes - intersect_mins, 0.)
+                intersect_area = intersect_wh[0] * intersect_wh[1]
+                box_area = box[2] * box[3]
+                anchor_area = anchor[0] * anchor[1]
+                iou = intersect_area / (box_area + anchor_area - intersect_area)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_anchor = k
+
+            if best_iou > 0:
+                detection_mask[ba, cy, cx, best_anchor] = 1
+                # Removed np.log for box size (exp is used in loss calculation)
+                yolo_box = np.array(
+                    [box[0] - cx, box[1] - cy,
+                     box[2] / ANCHORS[best_anchor][0],
+                     box[3] / ANCHORS[best_anchor][1], class_id],
+                    dtype=np.float32)
+                # print("YOLO_BOX", yolo_box)
+                gt_yolo_map[ba, cy, cx, best_anchor] = yolo_box
+    return detection_mask, gt_yolo_map
 
 
 # ------------------------
@@ -30,99 +118,70 @@ CLASSES = 80
 # ------------------------
 
 
-# Load data from Coco dataset
-# https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoDemo.ipynb
-def load_data():
-    global data_lbl, data_img
-    # Collect data path (images and labels filepath)
-    dataDir = '/home/amusaal/DATA/Coco'
-    dataType = 'val2014'
-    # Annotations
-    annFile = '{}/annotations/instances_{}.json'.format(dataDir, dataType)
-    coco = COCO(annFile)
-    imgIds = coco.getImgIds()
-    random.shuffle(imgIds)
+def conv_label(nbo, classes, bboxes):
+    # !TODO
+    rx, ry = int(WIDTH / GRID_WIDTH), int(HEIGHT / GRID_HEIGHT)
+    dshape = (GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, CLASSES + 5)
+    clabel = np.zeros(dshape)
+    for n in range(nbo):
+        bb = bboxes[n]
+        bx, by, bw, bh = bb
+        class_id = classes[n]
+        cx = bx // rx
+        cy = by // ry
+        anchor_id = yolo_ground_truth(bb)
+        clabel[cy, cx, anchor_id, 0] = bx
+        clabel[cy, cx, anchor_id, 1] = by
+        clabel[cy, cx, anchor_id, 2] = bw
+        clabel[cy, cx, anchor_id, 3] = bh
+        clabel[cy, cx, anchor_id, 4] = 1
+        clabel[cy, cx, anchor_id, 4 + class_id] = 1
 
-    # print(coco.loadImgs([imgIds[0]]))
-    # print(coco.loadAnns([annIds[0]]))
-
-    # Collect images IDs and filenames
-    print("Loading Images")
-    for im in coco.loadImgs(imgIds):
-        im_id = im['id']
-        im_filename = im['file_name']
-        data_img[im_id] = im_filename
-        # Collect annotations
-        annIds = coco.getAnnIds([im_id])
-        data_lbl[im_id] = [[ann['category_id'], ann['bbox']] for ann in coco.loadAnns(annIds)]
-
-    print("All data loaded")
-    nb_img = len(data_img.keys())
-    nb_ann = len(data_lbl.keys())
-    return nb_img, nb_ann
-
-
-def fill_feed_dict(images_pl, labels_pl, nb_images):
-    """
-    Set the feed_dict to fill the placeholder
-    :param dataset:         Dataset
-    :param images_pl:       Images placeholder
-    :param labels_pl:       Labels placeholder
-    :return:                feed_dict
-    """
-    global data_img, data_lbl
-    img_keys = np.random.randint(0, nb_images, BATCH_SIZE)
-    images_feed = []
-    labels_feed = []
-    for k in img_keys:
-        img_file = tf.read_file(data_img[k])
-        img_decoded = tf.image.decode_image(img_file, channels=3)
-        lbls = data_lbl[k]
-        images_feed.append(img_decoded)
-        labels_feed.append(lbls)
-    images_feed = tf.image.resize_images(images_feed, (WIDTH, HEIGHT))
-    feed_dict = {
-        images_pl: images_feed,
-        labels_pl: labels_feed,
-    }
-    return feed_dict
+    return clabel
 
 
 def _parse_(serialized_example):
-    feature = {'image': tf.FixedLenFeature((), tf.string),
+    """feature = {'image': tf.FixedLenFeature((), tf.string),
                'height': tf.FixedLenFeature([], tf.int64),
                'width': tf.FixedLenFeature([], tf.int64),
                'objects_number': tf.FixedLenFeature([], tf.int64),
                'class': tf.VarLenFeature(tf.int64),
+               'bboxes': tf.VarLenFeature(tf.float32)}"""
+    feature = {'image': tf.FixedLenFeature((), tf.string),
+               'height': tf.FixedLenFeature([], tf.int64),
+               'width': tf.FixedLenFeature([], tf.int64),
+               'objects_number': tf.FixedLenFeature([], tf.int64),
                'bboxes': tf.VarLenFeature(tf.float32)}
     features = tf.parse_single_example(serialized_example, feature)
     image = tf.image.decode_jpeg(features['image'], 3)
     bboxes = tf.sparse_tensor_to_dense(features['bboxes'], default_value=0)
-    labels = tf.sparse_tensor_to_dense(features['class'], default_value=0)  # tf.decode_raw
+    # labels = tf.sparse_tensor_to_dense(features['class'], default_value=0)  # tf.decode_raw
     height = tf.cast(features['height'], tf.int32)
     width = tf.cast(features['width'], tf.int32)
     nb_objects = tf.cast(features['objects_number'], tf.int32)
     is_object = tf.cast(nb_objects, tf.bool)
 
-    image_shape = tf.stack([height, width, 3])
-    bboxes_shape = tf.stack([nb_objects, 4])
-    label_shape = tf.stack([nb_objects])  # ,1)
+    # image_shape = tf.stack([height, width, 3])
+    bboxes_shape = tf.stack([nb_objects, 5])
+    # label_shape = tf.stack([nb_objects])  # ,1)
 
     image = tf.reshape(image, [height, width, 3])
     bboxes = tf.cond(is_object,
                      lambda: tf.reshape(bboxes, bboxes_shape),
                      lambda: tf.constant(-1.0))
-    labels = tf.cond(is_object,
-                     lambda: tf.reshape(labels, label_shape),
-                     lambda: tf.constant(-1, dtype=tf.int64))
+    # labels = tf.cond(is_object,
+    #                  lambda: tf.reshape(labels, label_shape),
+    #                  lambda: tf.constant(-1, dtype=tf.int64))
 
+    # d_map, gt_map = yolo_ground_truth(bboxes)
     image = tf.image.resize_image_with_crop_or_pad(image=image,
                                                    target_height=HEIGHT,
                                                    target_width=WIDTH)
     # image = tf.reshape(image, [BATCH_SIZE, HEIGHT, WIDTH, DEPTH])
-    #!TODO: Normaliser images = /255.0
+    # !TODO: Normaliser images = /255.0
 
-    return (image, [height], [width], [nb_objects], labels, bboxes)
+    # return (image, [height], [width], [nb_objects], bboxes)
+    return (image, bboxes, [nb_objects])
 
 
 def tfrecord_train_input_fn(tfrecord_path):
@@ -143,7 +202,7 @@ def variables_yolo(init):
     variables = {}
     W = [None] * 23
     B = [None] * 23
-    grid_depth =  ANCHORS * (CLASSES + 5)
+    grid_depth = NB_ANCHORS * (CLASSES + 5)
 
     # Block 1
     W[0] = tf.get_variable("w1", [3, 3, 3, 32], initializer=init)
@@ -188,6 +247,7 @@ def variables_yolo(init):
     B[16] = tf.get_variable("b17", [512], initializer=init)
     W[17] = tf.get_variable("w18", [3, 3, 512, 1024], initializer=init)
     B[17] = tf.get_variable("b18", [1024], initializer=init)
+
     W[18] = tf.get_variable("w19", [3, 3, 1024, 1024], initializer=init)
     B[18] = tf.get_variable("b19", [1024], initializer=init)
     W[19] = tf.get_variable("w20", [3, 3, 1024, 1024], initializer=init)
@@ -204,12 +264,12 @@ def variables_yolo(init):
     for wk in range(1, len(W) + 1):
         wk_name = "w" + str(wk)
         bk_name = "b" + str(wk)
-        variables[wk_name] = W[wk-1]
-        variables[bk_name] = B[wk-1]
+        variables[wk_name] = W[wk - 1]
+        variables[bk_name] = B[wk - 1]
     return variables
 
 
-def conv(x, kernel, bias, stride, name, pad="SAME"):
+def conv(x, kernel, bias, stride, name, batchnorm=True, pad="SAME"):
     """
     Convolution Layer
     :param x:           Input data
@@ -223,7 +283,7 @@ def conv(x, kernel, bias, stride, name, pad="SAME"):
     with tf.name_scope(name):
         xW = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1], padding=pad)
         z = tf.nn.bias_add(xW, bias)
-        bn = tf.contrib.layers.batch_norm(z)
+        bn = tf.contrib.layers.batch_norm(z) if batchnorm else z
         a = tf.nn.leaky_relu(bn, LEAKY)
     return (a)
 
@@ -248,14 +308,56 @@ def passthrough(x, p, kernel, bias, stride, size, name):
     return y
 
 
-def loss():
-    return
+def yolo_loss(pred, detection_map, ground_truth):
+    mask = detection_map
+    label = ground_truth
+    # mask = ground_truth[...,5:]
+    # label = ground_truth[...,0:5]
+
+    mask = tf.cast(tf.reshape(mask, shape=(-1, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS)), tf.bool)
+
+    with tf.name_scope('mask'):
+        masked_label = tf.boolean_mask(label, mask)
+        masked_pred = tf.boolean_mask(pred, mask)
+        masked_pred_noobj = tf.boolean_mask(pred, tf.logical_not(mask))
+
+    with tf.name_scope('pred'):
+        masked_pred_xy = tf.sigmoid(masked_pred[..., 0:2])  # - cx/xy
+        # !TODO Not exponent or remove log from GT
+        masked_pred_wh = tf.sqrt(tf.exp(masked_pred[..., 2:4]))
+        # masked_pred_wh = tf.sqrt(masked_pred[..., 2:4])
+        masked_pred_o = tf.sigmoid(masked_pred[..., 4:])
+        masked_pred_no_o = tf.sigmoid(masked_pred_noobj[..., 4:])
+        masked_pred_c = tf.nn.softmax(masked_pred[..., 5:])
+
+    with tf.name_scope('lab'):
+        masked_label_xy = masked_label[..., 0:2]
+        masked_label_wh = tf.sqrt(masked_label[..., 2:4])
+        masked_label_c = masked_label[..., 4:]
+        masked_label_c_vec = tf.reshape(tf.one_hot(tf.cast(masked_label_c, tf.int32), depth=CLASSES),
+                                        shape=(-1, CLASSES))
+
+    with tf.name_scope('merge'):
+        with tf.name_scope('loss_xy'):
+            loss_xy = tf.reduce_sum(tf.square(masked_pred_xy - masked_label_xy))
+        with tf.name_scope('loss_wh'):
+            loss_wh = tf.reduce_sum(tf.square(masked_pred_wh - masked_label_wh))
+        with tf.name_scope('loss_obj'):
+            loss_obj = tf.reduce_sum(tf.square(masked_pred_o - 1))
+        with tf.name_scope('loss_no_obj'):
+            loss_no_obj = tf.reduce_sum(tf.square(masked_pred_no_o))
+        with tf.name_scope('loss_class'):
+            loss_c = tf.reduce_sum(tf.square(masked_pred_c - masked_label_c_vec))
+
+        loss = LCOORD * (loss_xy + loss_wh) + loss_obj + LNOOBJ * loss_no_obj + loss_c
+
+    return loss
 
 
 def yolo(data, vars):
     # Block 1
     x = conv(data, vars["w1"], vars["b1"], 1, "conv1")
-    x = maxpool(x, 2, 2, "pool1")           # Pooling
+    x = maxpool(x, 2, 2, "pool1")  # Pooling
 
     x = conv(x, vars["w2"], vars["b2"], 1, "conv2")
     x = maxpool(x, 2, 2, "pool2")
@@ -289,9 +391,9 @@ def yolo(data, vars):
     x = conv(x, vars["w20"], vars["b20"], 1, "conv20")
     x = passthrough(x, pl, vars["w21"], vars["b21"], 1, 2, "conv21")
     x = conv(x, vars["w22"], vars["b22"], 1, "conv22")
-    x = conv(x, vars["w23"], vars["b23"], 1, "conv23")
+    x = conv(x, vars["w23"], vars["b23"], 1, "conv23", False)
 
-    dshape = (-1, GRID_HEIGHT, GRID_WIDTH, ANCHORS, CLASSES + 5)
+    dshape = (-1, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, CLASSES + 5)
     y = tf.reshape(x, shape=dshape, name="detection")
 
     return y
@@ -302,16 +404,18 @@ def yolo(data, vars):
 # ------------------------
 
 # TFRecords dataset paths
-train_dataset = "../DATA/Coco/train2014.tfrecords"
-valid_dataset = "../DATA/Coco/val2014.tfrecords"
+train_dataset = "../DATA/Coco/train2014_yolo.tfrecords"
+valid_dataset = "../DATA/Coco/val2014_yolo.tfrecords"
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
 # image, label, bboxes, nb_objects = read_and_decode(filename_queue)
 
 tfrecord_dataset = tf.data.TFRecordDataset(valid_dataset)
+tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=10000)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
 # tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
-pad_shapes = ([None, None, DEPTH], [1], [1], [1], [None], [None, 4])
+# pad_shapes = ([None, None, DEPTH], [1], [1], [1], [None], [None, 4])
+pad_shapes = ([None, None, DEPTH], [None, 5], [1])
 tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
@@ -323,19 +427,34 @@ init_op = tf.group(tf.global_variables_initializer(),
 # Weights
 w_init = tf.contrib.layers.xavier_initializer()
 
-# Create a saver for writing training checkpoints.
-# weights_file = "yolo.weights"
-# saver = tf.train.Saver(weights_file)
-
-
 # Network (Training)
+dct_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 1], dtype=np.int32,
+                             name="dmap_placeholder")
+gt_yolo_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 5], dtype=np.float32,
+                                 name="gt_placeholder")
 image = tf.placeholder(shape=[None, HEIGHT, WIDTH, DEPTH], dtype=tf.float32, name='image_placeholder')
-# label = tf.placeholder(shape=[None, GRID_H, GRID_W, N_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
+loss = tf.placeholder(shape=[None, 1], dtype=tf.float32, name="loss_placeholder")
+# label = tf.placeholder(shape=[None, GRID_H, GRID_W, NB_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
 variables = variables_yolo(w_init)
 predictions = yolo(image, variables)
+yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
 
 # Create the session
-sess = tf.Session()
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+sess = tf.Session(config=config)
+
+
+
+# Create a saver for writing training checkpoints.
+d1 = "../darkflow/built_graph/"
+d2 = "../darknet/"
+weights_file = "{}yolov2.ckpt".format(d2)
+# weights_vars = {key:value for key,value in variables.items() if key[0] == "w"}
+saver = tf.train.Saver()
+# saver.restore(sess, tf.train.latest_checkpoint(weights_file))
+
+
 
 # Run the session
 sess.run(init_op)
@@ -345,11 +464,38 @@ sess.run(tf.global_variables_initializer())
 coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
-imgs, H, W, NO, lbls, bbs = sess.run(next_element)
+# Load weights
+#!TODO Load weights
+# print("Loading Model ...")
+# var_names = tf.contrib.framework.list_variables(weights_file)
+# for name, shape in var_names:
+#     if not 'weights' in name:
+#         continue
+#     wname = "w" + name[19:name.index('/')]
+#     var = tf.contrib.framework.load_variable(weights_file, name)
+#     sess.run(variables[wname].assign(var))
+# print("Done !")
 
-# _, loss_data, data = sess.run([train_step, loss, y], feed_dict={train_flag: True, image: image_data, label: label_data})
-pred = sess.run([predictions], feed_dict={image: imgs})
-print(pred)
+# Load data
+# imgs, H, W, NO, lbls, bbs = sess.run(next_element)
+imgs, bbs, NO = sess.run(next_element)
+print(NO)
+
+# Ground truth maps
+detection_maps, ground_truth_yolo_maps = yolo_ground_truth(np.array(bbs), NO)
+print(np.array(detection_maps).shape)
+print(np.array(ground_truth_yolo_maps).shape)
+
+# Forward
+# pred = sess.run(predictions, feed_dict={image: imgs})
+# print(np.array(pred).shape)
+
+# Loss
+loss = sess.run(yolo_losses,
+                feed_dict={image: imgs, dct_maps_pl: detection_maps, gt_yolo_maps_pl: ground_truth_yolo_maps})
+print(loss)
+
+#!TODO Make detection from predictions
 
 """for i in range(1):
     print('Current batch')
@@ -364,11 +510,11 @@ print(pred)
 
 writer = tf.summary.FileWriter('./log/yolo', sess.graph)
 
-# Intialize iterator with training data
-# sess.run(iterator.initializer, feed_dict={filenames: train_dataset})
-
 coord.request_stop()
 coord.join(threads)
+
+# Save weights
+save_path = saver.save(sess, "./coco_yolov2.ckpt")
 
 # Close the session
 sess.close()
