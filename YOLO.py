@@ -11,8 +11,8 @@ from pycocotools.coco import COCO
 #   HYPERPARAMETERS
 # ------------------------
 
-WIDTH = 608
-HEIGHT = 608
+WIDTH = 480
+HEIGHT = 480
 assert WIDTH % 32 == 0, 'Network input size should be mutliple of 32.'
 assert HEIGHT % 32 == 0, 'Network input size should be mutliple of 32.'
 DEPTH = 3
@@ -120,28 +120,6 @@ def yolo_ground_truth(batch_true_boxes, num_objects):
 # ------------------------
 
 
-def conv_label(nbo, classes, bboxes):
-    # !TODO
-    rx, ry = int(WIDTH / GRID_WIDTH), int(HEIGHT / GRID_HEIGHT)
-    dshape = (GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, CLASSES + 5)
-    clabel = np.zeros(dshape)
-    for n in range(nbo):
-        bb = bboxes[n]
-        bx, by, bw, bh = bb
-        class_id = classes[n]
-        cx = bx // rx
-        cy = by // ry
-        anchor_id = yolo_ground_truth(bb)
-        clabel[cy, cx, anchor_id, 0] = bx
-        clabel[cy, cx, anchor_id, 1] = by
-        clabel[cy, cx, anchor_id, 2] = bw
-        clabel[cy, cx, anchor_id, 3] = bh
-        clabel[cy, cx, anchor_id, 4] = 1
-        clabel[cy, cx, anchor_id, 4 + class_id] = 1
-
-    return clabel
-
-
 def _parse_(serialized_example):
     """feature = {'image': tf.FixedLenFeature((), tf.string),
                'height': tf.FixedLenFeature([], tf.int64),
@@ -200,19 +178,39 @@ def load_weights(wfile):
     global variables, sess
     print("Loading Model ...")
     var_names = tf.contrib.framework.list_variables(wfile)
+    # Collect batch normalization variables
+    first = True
+    bn_vars = {}
+    for va in tf.global_variables:
+        varname = va.op.name
+        if not 'batch_normalization' in varname:
+            continue
+        if first:
+            bname = "bn1"
+            first = False
+        else:
+            bid = int(va.op.name[20:varname.index('/')]) + 1
+            bname = "bn" + str(bid)
+        if not bname in bn_vars.keys():
+            bn_vars[bname] = [None, None]
+        if 'moving_mean' in varname:
+            bn_vars[bname][0] = va
+        elif 'moving_variance' in varname:
+            bn_vars[bname][1] = va
+    # Assign pre-trained weights values
     for name, shape in var_names:
         if 'weights' in name:
             wname = "w" + name[19:name.index('/')]
             var = tf.contrib.framework.load_variable(wfile, name)
             sess.run(variables[wname].assign(var))
         if 'moving_mean' in name:
-            mname = "m" + name[19:name.index('/')]
+            mname = "bn" + name[19:name.index('/')]
             var = tf.contrib.framework.load_variable(wfile, name)
-            sess.run(variables[mname].assign(var))
+            sess.run(bn_vars[mname][0].assign(var))
         if 'moving_variance' in name:
             vname = "bn" + name[19:name.index('/')]
             var = tf.contrib.framework.load_variable(wfile, name)
-            sess.run(variables[vname].assign(var))
+            sess.run(bn_vars[vname][1].assign(var))
     return
 
 # ------------------------
@@ -354,10 +352,11 @@ def conv(x, kernel, bias, stride, name, bn_weights, batchnorm=True, pad="SAME"):
         z = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1], padding=pad)
         # z = tf.nn.bias_add(z, bias)
         # bn = tf.contrib.layers.batch_norm(z) if batchnorm else z
-        if batchnorm:
-            bn = tf.nn.batch_normalization(z, bn_weights[0], bn_weights[1], None, None, 1e-3)
-        else:
-            bn = z
+        bn = tf.layers.batch_normalization(z, training=True) if batchnorm else z
+        # if batchnorm:
+        #     bn = tf.nn.batch_normalization(z, bn_weights[0], bn_weights[1], None, None, 1e-5)
+        # else:
+        #     bn = z
         a = tf.nn.leaky_relu(bn, LEAKY)
     return a
 
@@ -492,6 +491,12 @@ def describe_model():
     msg.append("Total param={} ({:01f} MB assuming all float32)".format(total, size_mb))
     print("Model Parameters: {}".format('\n'.join(msg)))
 
+def get_variables_values(sess):
+    variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+    values = {}
+    for variable in variables:
+        values[variable.name[:-2]] = sess.run(variable)
+    return values
 
 # TFRecords dataset paths
 train_dataset = "../DATA/Coco/train2014_yolo.tfrecords"
@@ -511,28 +516,29 @@ tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
 
 # Add the variable initializer Op.
-init_op = tf.group(tf.global_variables_initializer(),
-                   tf.local_variables_initializer())
+init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
 # Weights initializer
 w_init = tf.contrib.layers.xavier_initializer()
 
 # Network (Training)
-dct_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 1], dtype=np.int32,
-                             name="dmap_placeholder")
-gt_yolo_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 5], dtype=np.float32,
-                                 name="gt_placeholder")
+dct_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 1],
+                             dtype=np.int32, name="dmap_placeholder")
+gt_yolo_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 5],
+                                 dtype=np.float32, name="gt_placeholder")
 image = tf.placeholder(shape=[None, HEIGHT, WIDTH, DEPTH], dtype=tf.float32, name='image_placeholder')
 loss = tf.placeholder(shape=[None, 1], dtype=tf.float32, name="loss_placeholder")
 # label = tf.placeholder(shape=[None, GRID_H, GRID_W, NB_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
 
-variables = variables_yolo(w_init)
-predictions = yolo(image, variables)
-yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
-opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
-update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-with tf.control_dependencies(update_ops):
-    train_step = opt.minimize(yolo_losses)
+
+with tf.device('/gpu:1'):
+    variables = variables_yolo(w_init)
+    predictions = yolo(image, variables)
+    yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
+    opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    with tf.control_dependencies(update_ops):
+        train_step = opt.minimize(yolo_losses)
 
 # Create the session
 config = tf.ConfigProto()
@@ -565,15 +571,18 @@ coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 # Load weights
-bn_vars = load_weights(weights_file)
+# load_weights(weights_file)
 
-
-describe_model()
+# DEBUG
+# describe_model()
+# print(get_variables_values(sess).keys())
 # print("\n\n")
 # key = "BatchNorm/moving_mean"
 # with tf.variable_scope("conv1", reuse=tf.AUTO_REUSE):
 #     v = tf.get_variable(key, shape=(32,))
 # print(v)
+# print(sess.run(tf.get_variable('batch_normalization_15/moving_mean')))
+
 NUM_ITERS = 1
 
 for it in range(NUM_ITERS):
