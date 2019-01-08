@@ -17,7 +17,9 @@ assert WIDTH % 32 == 0, 'Network input size should be mutliple of 32.'
 assert HEIGHT % 32 == 0, 'Network input size should be mutliple of 32.'
 DEPTH = 3
 CHANNELS = 3
-BATCH_SIZE = 1
+BATCH_SIZE = 16
+LEARNING_RATE = 0.001
+NUM_ITERS = 1000
 NB_ANCHORS = 5
 GRID_WIDTH = WIDTH // 32
 GRID_HEIGHT = HEIGHT // 32
@@ -193,6 +195,26 @@ def tfrecord_train_input_fn(tfrecord_path):
     return tfrecord_iterator.get_next()
 
 
+def load_weights(wfile):
+    # !TODO Load weights
+    global variables, sess
+    print("Loading Model ...")
+    var_names = tf.contrib.framework.list_variables(wfile)
+    for name, shape in var_names:
+        if 'weights' in name:
+            wname = "w" + name[19:name.index('/')]
+            var = tf.contrib.framework.load_variable(wfile, name)
+            sess.run(variables[wname].assign(var))
+        if 'moving_mean' in name:
+            mname = "m" + name[19:name.index('/')]
+            var = tf.contrib.framework.load_variable(wfile, name)
+            sess.run(variables[mname].assign(var))
+        if 'moving_variance' in name:
+            vname = "bn" + name[19:name.index('/')]
+            var = tf.contrib.framework.load_variable(wfile, name)
+            sess.run(variables[vname].assign(var))
+    return
+
 # ------------------------
 #       NETWORK
 # ------------------------
@@ -202,62 +224,108 @@ def variables_yolo(init):
     variables = {}
     W = [None] * 23
     B = [None] * 23
+    M = [None] * 22
+    V = [None] * 22
     grid_depth = NB_ANCHORS * (CLASSES + 5)
 
     # Block 1
     W[0] = tf.get_variable("w1", [3, 3, 3, 32], initializer=init)
     B[0] = tf.get_variable("b1", [32], initializer=init)
+    M[0] = tf.get_variable("m1", [32], initializer=init)
+    V[0] = tf.get_variable("v1", [32], initializer=init)
     W[1] = tf.get_variable("w2", [3, 3, 32, 64], initializer=init)
     B[1] = tf.get_variable("b2", [64], initializer=init)
+    M[1] = tf.get_variable("m2", [64], initializer=init)
+    V[1] = tf.get_variable("v2", [64], initializer=init)
     W[2] = tf.get_variable("w3", [3, 3, 64, 128], initializer=init)
     B[2] = tf.get_variable("b3", [128], initializer=init)
+    M[2] = tf.get_variable("m3", [128], initializer=init)
+    V[2] = tf.get_variable("v3", [128], initializer=init)
     W[3] = tf.get_variable("w4", [1, 1, 128, 64], initializer=init)
     B[3] = tf.get_variable("b4", [64], initializer=init)
+    M[3] = tf.get_variable("m4", [64], initializer=init)
+    V[3] = tf.get_variable("v4", [64], initializer=init)
     W[4] = tf.get_variable("w5", [3, 3, 64, 128], initializer=init)
     B[4] = tf.get_variable("b5", [128], initializer=init)
+    M[4] = tf.get_variable("m5", [128], initializer=init)
+    V[4] = tf.get_variable("v5", [128], initializer=init)
 
     # Block 2
     W[5] = tf.get_variable("w6", [3, 3, 128, 256], initializer=init)
     B[5] = tf.get_variable("b6", [256], initializer=init)
+    M[5] = tf.get_variable("m6", [256], initializer=init)
+    V[5] = tf.get_variable("v6", [256], initializer=init)
     W[6] = tf.get_variable("w7", [1, 1, 256, 128], initializer=init)
     B[6] = tf.get_variable("b7", [128], initializer=init)
+    M[6] = tf.get_variable("m7", [128], initializer=init)
+    V[6] = tf.get_variable("v7", [128], initializer=init)
     W[7] = tf.get_variable("w8", [3, 3, 128, 256], initializer=init)
     B[7] = tf.get_variable("b8", [256], initializer=init)
+    M[7] = tf.get_variable("m8", [256], initializer=init)
+    V[7] = tf.get_variable("v8", [256], initializer=init)
 
     # Block 3
     W[8] = tf.get_variable("w9", [3, 3, 256, 512], initializer=init)
     B[8] = tf.get_variable("b9", [512], initializer=init)
+    M[8] = tf.get_variable("m9", [512], initializer=init)
+    V[8] = tf.get_variable("v9", [512], initializer=init)
     W[9] = tf.get_variable("w10", [1, 1, 512, 256], initializer=init)
     B[9] = tf.get_variable("b10", [256], initializer=init)
+    M[9] = tf.get_variable("m10", [256], initializer=init)
+    V[9] = tf.get_variable("v10", [256], initializer=init)
     W[10] = tf.get_variable("w11", [3, 3, 256, 512], initializer=init)
     B[10] = tf.get_variable("b11", [512], initializer=init)
+    M[10] = tf.get_variable("m11", [512], initializer=init)
+    V[10] = tf.get_variable("v11", [512], initializer=init)
     W[11] = tf.get_variable("w12", [1, 1, 512, 256], initializer=init)
     B[11] = tf.get_variable("b12", [256], initializer=init)
+    M[11] = tf.get_variable("m12", [256], initializer=init)
+    V[11] = tf.get_variable("v12", [256], initializer=init)
     W[12] = tf.get_variable("w13", [3, 3, 256, 512], initializer=init)
     B[12] = tf.get_variable("b13", [512], initializer=init)
+    M[12] = tf.get_variable("m13", [512], initializer=init)
+    V[12] = tf.get_variable("v13", [512], initializer=init)
 
     # Block 4
     W[13] = tf.get_variable("w14", [3, 3, 512, 1024], initializer=init)
     B[13] = tf.get_variable("b14", [1024], initializer=init)
+    M[13] = tf.get_variable("m14", [1024], initializer=init)
+    V[13] = tf.get_variable("v14", [1024], initializer=init)
     W[14] = tf.get_variable("w15", [1, 1, 1024, 512], initializer=init)
     B[14] = tf.get_variable("b15", [512], initializer=init)
+    M[14] = tf.get_variable("m15", [512], initializer=init)
+    V[14] = tf.get_variable("v15", [512], initializer=init)
     W[15] = tf.get_variable("w16", [3, 3, 512, 1024], initializer=init)
     B[15] = tf.get_variable("b16", [1024], initializer=init)
+    M[15] = tf.get_variable("m16", [1024], initializer=init)
+    V[15] = tf.get_variable("v16", [1024], initializer=init)
     W[16] = tf.get_variable("w17", [1, 1, 1024, 512], initializer=init)
     B[16] = tf.get_variable("b17", [512], initializer=init)
+    M[16] = tf.get_variable("m17", [512], initializer=init)
+    V[16] = tf.get_variable("v17", [512], initializer=init)
     W[17] = tf.get_variable("w18", [3, 3, 512, 1024], initializer=init)
     B[17] = tf.get_variable("b18", [1024], initializer=init)
+    M[17] = tf.get_variable("m18", [1024], initializer=init)
+    V[17] = tf.get_variable("v18", [1024], initializer=init)
 
     W[18] = tf.get_variable("w19", [3, 3, 1024, 1024], initializer=init)
     B[18] = tf.get_variable("b19", [1024], initializer=init)
+    M[18] = tf.get_variable("m19", [1024], initializer=init)
+    V[18] = tf.get_variable("v19", [1024], initializer=init)
     W[19] = tf.get_variable("w20", [3, 3, 1024, 1024], initializer=init)
     B[19] = tf.get_variable("b20", [1024], initializer=init)
+    M[19] = tf.get_variable("m20", [1024], initializer=init)
+    V[19] = tf.get_variable("v20", [1024], initializer=init)
 
     # Block 5
     W[20] = tf.get_variable("w21", [1, 1, 512, 64], initializer=init)
     B[20] = tf.get_variable("b21", [64], initializer=init)
+    M[20] = tf.get_variable("m21", [64], initializer=init)
+    V[20] = tf.get_variable("v21", [64], initializer=init)
     W[21] = tf.get_variable("w22", [3, 3, 1280, 1024], initializer=init)
     B[21] = tf.get_variable("b22", [1024], initializer=init)
+    M[21] = tf.get_variable("m22", [1024], initializer=init)
+    V[21] = tf.get_variable("v22", [1024], initializer=init)
     W[22] = tf.get_variable("w23", [1, 1, 1024, grid_depth], initializer=init)
     B[22] = tf.get_variable("b23", [grid_depth], initializer=init)
 
@@ -266,10 +334,12 @@ def variables_yolo(init):
         bk_name = "b" + str(wk)
         variables[wk_name] = W[wk - 1]
         variables[bk_name] = B[wk - 1]
+        if wk != 23:
+            variables["bn" + str(wk)] = [M[wk - 1], V[wk - 1]]
     return variables
 
 
-def conv(x, kernel, bias, stride, name, batchnorm=True, pad="SAME"):
+def conv(x, kernel, bias, stride, name, bn_weights, batchnorm=True, pad="SAME"):
     """
     Convolution Layer
     :param x:           Input data
@@ -281,11 +351,15 @@ def conv(x, kernel, bias, stride, name, batchnorm=True, pad="SAME"):
     :return:            Activation of the output of the convolution
     """
     with tf.name_scope(name):
-        xW = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1], padding=pad)
-        z = tf.nn.bias_add(xW, bias)
-        bn = tf.contrib.layers.batch_norm(z) if batchnorm else z
+        z = tf.nn.conv2d(x, kernel, strides=[1, stride, stride, 1], padding=pad)
+        # z = tf.nn.bias_add(z, bias)
+        # bn = tf.contrib.layers.batch_norm(z) if batchnorm else z
+        if batchnorm:
+            bn = tf.nn.batch_normalization(z, bn_weights[0], bn_weights[1], None, None, 1e-3)
+        else:
+            bn = z
         a = tf.nn.leaky_relu(bn, LEAKY)
-    return (a)
+    return a
 
 
 def maxpool(x, size, stride, name, pad="SAME"):
@@ -301,8 +375,8 @@ def maxpool(x, size, stride, name, pad="SAME"):
     return tf.nn.max_pool(x, [1, size, size, 1], [1, stride, stride, 1], padding=pad, name=name)
 
 
-def passthrough(x, p, kernel, bias, stride, size, name):
-    cl = conv(p, kernel, bias, stride, name)
+def passthrough(x, p, kernel, bias, stride, size, name, bn_weights):
+    cl = conv(p, kernel, bias, stride, name, bn_weights)
     cl = tf.space_to_depth(cl, size)
     y = tf.concat([x, cl], axis=3)
     return y
@@ -356,42 +430,42 @@ def yolo_loss(pred, detection_map, ground_truth):
 
 def yolo(data, vars):
     # Block 1
-    x = conv(data, vars["w1"], vars["b1"], 1, "conv1")
+    x = conv(data, vars["w1"], vars["b1"], 1, "conv1", vars["bn1"])
     x = maxpool(x, 2, 2, "pool1")  # Pooling
 
-    x = conv(x, vars["w2"], vars["b2"], 1, "conv2")
+    x = conv(x, vars["w2"], vars["b2"], 1, "conv2", vars["bn2"])
     x = maxpool(x, 2, 2, "pool2")
 
-    x = conv(x, vars["w3"], vars["b3"], 1, "conv3")
-    x = conv(x, vars["w4"], vars["b4"], 1, "conv4")
-    x = conv(x, vars["w5"], vars["b5"], 1, "conv5")
+    x = conv(x, vars["w3"], vars["b3"], 1, "conv3", vars["bn3"])
+    x = conv(x, vars["w4"], vars["b4"], 1, "conv4", vars["bn4"])
+    x = conv(x, vars["w5"], vars["b5"], 1, "conv5", vars["bn5"])
     x = maxpool(x, 2, 2, "pool3")
 
     # Block 2
-    x = conv(x, vars["w6"], vars["b6"], 1, "conv6")
-    x = conv(x, vars["w7"], vars["b7"], 1, "conv7")
-    x = conv(x, vars["w8"], vars["b8"], 1, "conv8")
+    x = conv(x, vars["w6"], vars["b6"], 1, "conv6", vars["bn6"])
+    x = conv(x, vars["w7"], vars["b7"], 1, "conv7", vars["bn7"])
+    x = conv(x, vars["w8"], vars["b8"], 1, "conv8", vars["bn8"])
     x = maxpool(x, 2, 2, "pool4")
 
     # Block 3
-    x = conv(x, vars["w9"], vars["b9"], 1, "conv9")
-    x = conv(x, vars["w10"], vars["b10"], 1, "conv10")
-    x = conv(x, vars["w11"], vars["b11"], 1, "conv11")
-    x = conv(x, vars["w12"], vars["b12"], 1, "conv12")
-    pl = conv(x, vars["w13"], vars["b13"], 1, "conv13")
+    x = conv(x, vars["w9"], vars["b9"], 1, "conv9", vars["bn9"])
+    x = conv(x, vars["w10"], vars["b10"], 1, "conv10", vars["bn10"])
+    x = conv(x, vars["w11"], vars["b11"], 1, "conv11", vars["bn11"])
+    x = conv(x, vars["w12"], vars["b12"], 1, "conv12", vars["bn12"])
+    pl = conv(x, vars["w13"], vars["b13"], 1, "conv13", vars["bn13"])
     x = maxpool(pl, 2, 2, "pool5")
 
     # Block 4
-    x = conv(x, vars["w14"], vars["b14"], 1, "conv14")
-    x = conv(x, vars["w15"], vars["b15"], 1, "conv15")
-    x = conv(x, vars["w16"], vars["b16"], 1, "conv16")
-    x = conv(x, vars["w17"], vars["b17"], 1, "conv17")
-    x = conv(x, vars["w18"], vars["b18"], 1, "conv18")
-    x = conv(x, vars["w19"], vars["b19"], 1, "conv19")
-    x = conv(x, vars["w20"], vars["b20"], 1, "conv20")
-    x = passthrough(x, pl, vars["w21"], vars["b21"], 1, 2, "conv21")
-    x = conv(x, vars["w22"], vars["b22"], 1, "conv22")
-    x = conv(x, vars["w23"], vars["b23"], 1, "conv23", False)
+    x = conv(x, vars["w14"], vars["b14"], 1, "conv14", vars["bn14"])
+    x = conv(x, vars["w15"], vars["b15"], 1, "conv15", vars["bn15"])
+    x = conv(x, vars["w16"], vars["b16"], 1, "conv16", vars["bn16"])
+    x = conv(x, vars["w17"], vars["b17"], 1, "conv17", vars["bn17"])
+    x = conv(x, vars["w18"], vars["b18"], 1, "conv18", vars["bn18"])
+    x = conv(x, vars["w19"], vars["b19"], 1, "conv19", vars["bn19"])
+    x = conv(x, vars["w20"], vars["b20"], 1, "conv20", vars["bn20"])
+    x = passthrough(x, pl, vars["w21"], vars["b21"], 1, 2, "conv21", vars["bn21"])
+    x = conv(x, vars["w22"], vars["b22"], 1, "conv22", vars["bn22"])
+    x = conv(x, vars["w23"], vars["b23"], 1, "conv23", None, False)
 
     dshape = (-1, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, CLASSES + 5)
     y = tf.reshape(x, shape=dshape, name="detection")
@@ -403,13 +477,29 @@ def yolo(data, vars):
 #          TRAIN
 # ------------------------
 
+def describe_model():
+    """ print a description of the current model parameters """
+    train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+    msg = [""]
+    total = 0
+    for v in train_vars:
+        shape = v.get_shape()
+        ele = shape.num_elements()
+        total += ele
+        msg.append("{}: shape={}, dim={}".format(
+            v.name, shape.as_list(), ele))
+    size_mb = total * 4 / 1024.0**2
+    msg.append("Total param={} ({:01f} MB assuming all float32)".format(total, size_mb))
+    print("Model Parameters: {}".format('\n'.join(msg)))
+
+
 # TFRecords dataset paths
 train_dataset = "../DATA/Coco/train2014_yolo.tfrecords"
 valid_dataset = "../DATA/Coco/val2014_yolo.tfrecords"
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
 # image, label, bboxes, nb_objects = read_and_decode(filename_queue)
 
-tfrecord_dataset = tf.data.TFRecordDataset(valid_dataset)
+tfrecord_dataset = tf.data.TFRecordDataset(train_dataset)
 tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=10000)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
 # tfrecord_dataset = tfrecord_dataset.repeat()
@@ -424,7 +514,7 @@ next_element = tfrecord_iterator.get_next()
 init_op = tf.group(tf.global_variables_initializer(),
                    tf.local_variables_initializer())
 
-# Weights
+# Weights initializer
 w_init = tf.contrib.layers.xavier_initializer()
 
 # Network (Training)
@@ -435,9 +525,14 @@ gt_yolo_maps_pl = tf.placeholder(shape=[None, GRID_HEIGHT, GRID_WIDTH, NB_ANCHOR
 image = tf.placeholder(shape=[None, HEIGHT, WIDTH, DEPTH], dtype=tf.float32, name='image_placeholder')
 loss = tf.placeholder(shape=[None, 1], dtype=tf.float32, name="loss_placeholder")
 # label = tf.placeholder(shape=[None, GRID_H, GRID_W, NB_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
+
 variables = variables_yolo(w_init)
 predictions = yolo(image, variables)
 yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
+opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
+update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+with tf.control_dependencies(update_ops):
+    train_step = opt.minimize(yolo_losses)
 
 # Create the session
 config = tf.ConfigProto()
@@ -445,15 +540,17 @@ config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
 
-
 # Create a saver for writing training checkpoints.
 d1 = "../darkflow/built_graph/"
 d2 = "../darknet/"
 weights_file = "{}yolov2.ckpt".format(d2)
 # weights_vars = {key:value for key,value in variables.items() if key[0] == "w"}
-saver = tf.train.Saver()
+saver = tf.train.Saver(max_to_keep=4)
 # saver.restore(sess, tf.train.latest_checkpoint(weights_file))
 
+
+# Log
+summary = tf.summary.scalar(name='Loss', tensor=yolo_losses)
 
 
 # Run the session
@@ -461,39 +558,48 @@ sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
 sess.run(tf.global_variables_initializer())
 
+writer = tf.summary.FileWriter('./log/yolo', sess.graph)
+
+
 coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 # Load weights
-#!TODO Load weights
-# print("Loading Model ...")
-# var_names = tf.contrib.framework.list_variables(weights_file)
-# for name, shape in var_names:
-#     if not 'weights' in name:
-#         continue
-#     wname = "w" + name[19:name.index('/')]
-#     var = tf.contrib.framework.load_variable(weights_file, name)
-#     sess.run(variables[wname].assign(var))
-# print("Done !")
+bn_vars = load_weights(weights_file)
 
-# Load data
-# imgs, H, W, NO, lbls, bbs = sess.run(next_element)
-imgs, bbs, NO = sess.run(next_element)
-print(NO)
 
-# Ground truth maps
-detection_maps, ground_truth_yolo_maps = yolo_ground_truth(np.array(bbs), NO)
-print(np.array(detection_maps).shape)
-print(np.array(ground_truth_yolo_maps).shape)
+describe_model()
+# print("\n\n")
+# key = "BatchNorm/moving_mean"
+# with tf.variable_scope("conv1", reuse=tf.AUTO_REUSE):
+#     v = tf.get_variable(key, shape=(32,))
+# print(v)
+NUM_ITERS = 1
 
-# Forward
-# pred = sess.run(predictions, feed_dict={image: imgs})
-# print(np.array(pred).shape)
+for it in range(NUM_ITERS):
+    # Load data
+    # imgs, H, W, NO, lbls, bbs = sess.run(next_element)
+    imgs, bbs, NO = sess.run(next_element)
+    # print(NO)
 
-# Loss
-loss = sess.run(yolo_losses,
-                feed_dict={image: imgs, dct_maps_pl: detection_maps, gt_yolo_maps_pl: ground_truth_yolo_maps})
-print(loss)
+    # Ground truth maps
+    detection_maps, ground_truth_yolo_maps = yolo_ground_truth(np.array(bbs), NO)
+    # print(np.array(detection_maps).shape)
+    # print(np.array(ground_truth_yolo_maps).shape)
+
+    # Forward
+    # pred = sess.run(predictions, feed_dict={image: imgs})
+    # print(np.array(pred).shape)
+
+    # Loss
+    _, summary_str, loss = sess.run([train_step, summary, yolo_losses],
+                    feed_dict={image: imgs, dct_maps_pl: detection_maps, gt_yolo_maps_pl: ground_truth_yolo_maps})
+    print("Iter {}:\t\tLoss={}".format(it,loss))
+
+    if it + 1 % 10 == 0:
+        writer.add_summary(summary_str, global_step=it + 1)
+    if it + 1 % 1000 == 0:
+        saver.save(sess, "./coco_yolov2", global_step=it + 1)
 
 #!TODO Make detection from predictions
 
@@ -507,8 +613,6 @@ print(loss)
         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
     # cv2.imwrite("test/img.jpg", img)
     plt.imsave("test/img.jpg", img)"""
-
-writer = tf.summary.FileWriter('./log/yolo', sess.graph)
 
 coord.request_stop()
 coord.join(threads)
