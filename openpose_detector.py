@@ -2,7 +2,7 @@ import sys
 import cv2
 import os
 ODIR = '/home/amusaal/Yassine/openpose'
-sys.path.append(ODIR + '/python')
+sys.path.append(ODIR + '/build/python/openpose/')
 
 try:
     from openpose import *
@@ -29,9 +29,10 @@ params["default_model_folder"] = ODIR + "/models/"
 # Construct OpenPose object allocates GPU memory
 openpose = OpenPose(params)
 
-while 1:
+i=0
+while i < 1:
     # Read new image
-    img = cv2.imread("../../../examples/media/COCO_val2014_000000000192.jpg")
+    img = cv2.imread(ODIR + "/examples/media/COCO_val2014_000000000192.jpg")
     # Output keypoints and the image with the human skeleton blended on it
     keypoints, output_image = openpose.forward(img, True)
     # Print the human pose keypoints, i.e., a [#people x #keypoints x 3]-dimensional numpy object with the keypoints of all the people on that image
@@ -41,3 +42,4 @@ while 1:
     # cv2.waitKey(15)
     # Save th eimage
     cv2.imwrite("output.jpg", output_image)
+    i += 1
