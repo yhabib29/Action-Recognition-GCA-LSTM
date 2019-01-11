@@ -8,10 +8,11 @@ from pycocotools.coco import COCO
 
 
 def warning(msg):
-    orange ='\033[33m'
+    orange = '\033[33m'
     end = '\033[0m'
     print(orange + msg + end)
     return
+
 
 def error(msg):
     red = '\033[31m'
@@ -40,21 +41,26 @@ def load_image(filename):
     s = img.shape
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = img.astype(np.float32)
-    #img = cv2.imencode('.jpg', img)[1]
+    # img = cv2.imencode('.jpg', img)[1]
     f = open(filename, "rb")
     img = f.read()
     f.close()
     return s, img
 
 
-def load_joints(f,b, bmat):
+def load_joints(f, b, bmat):
     jts = []
+    tstates = []
     for j in range(25):
-        jt = {}
-        jt['trackingState'] = bmat['body'][f,b][0, 0][1][0, j][0][0][0][0][0]
-        jt['pcloud'] = bmat['body'][f,b][0, 0][1][0, j][0][0][5][0].tolist()
-        jts.append(jt)
-    return jts
+        tstates.append(bmat['body'][f, b][0, 0][1][0, j][0][0][0][0][0])
+        jts.append(bmat['body'][f, b][0, 0][1][0, j][0][0][5][0].tolist())
+    return tstates, jts
+
+
+def load_classes(ddir, dataset, fname):
+    mgnd = loadmat("{}/{}_class/{}/gnd.mat".format(ddir, dataset, fname))
+    gnd = [gn[0] for gn in mgnd['gnd']]
+    return gnd
 
 
 def int64_feature(value):
@@ -74,20 +80,22 @@ def bytes_feature(value):
 
 
 def gen_feature1(ft_image, bbo, height, width, nb_ob):
-    ft = { 'image': ft_image,
-           'height': int64_feature(height),
-           'width': int64_feature(width),
-           'objects_number': int64_feature(nb_ob),
-            'bboxes': float_feature_list(bbo)}
+    ft = {'image': ft_image,
+          'height': int64_feature(height),
+          'width': int64_feature(width),
+          'objects_number': int64_feature(nb_ob),
+          'bboxes': float_feature_list(bbo)}
     return ft
 
 
-def gen_feature2(ft_image, joints, height, width, nb_body):
-    ft = { 'image': ft_image,
-            'height': int64_feature(height),
-            'width': int64_feature(width),
-            'bodies_number': int64_feature(nb_body),
-            'joints': float_feature_list(joints)}
+def gen_feature2(ft_image, joints, tstates, aclass, height, width, nb_body):
+    ft = {'image': ft_image,
+          'height': int64_feature(height),
+          'width': int64_feature(width),
+          'class': int64_feature(aclass),
+          'bodies_number': int64_feature(nb_body),
+          'joints': float_feature_list(joints),
+          'trackingStates': float_feature_list(tstates)}
     return ft
 
 
@@ -160,11 +168,11 @@ def gen_coco_example(dataDir, dataType):
 
 # Generate Example for Cornell Dataset
 def gen_cornell_example(dataDir, dataType):
-    path = dataDir + dataType + '/'
+    path = "{}/{}/".format(dataDir, dataType)
     folders = os.listdir(path)
 
     for fid, folder in enumerate(folders):
-        print('[' + str(fid) + '/' + str(len(folders)) + ']')
+        print('[{}/{}]'.format(str(fid), str(len(folders))), end='\r')
         sys.stdout.flush()
 
         if not os.path.isdir(path + folder + '/rgbjpg'):
@@ -172,8 +180,10 @@ def gen_cornell_example(dataDir, dataType):
 
         body_mat = loadmat(path + folder + '/body.mat')
         nb_frames, nb_body = body_mat['body'].shape
+        classes = load_classes(dataDir, dataType, folder)
         for f in range(nb_frames):
-            bodies = []
+            tstates_list = []
+            joints_list = []
             # Load image
             img_fpath = path + folder + '/rgbjpg/' + str(f + 1).zfill(4) + '.jpg'
             if not os.path.isfile(img_fpath):
@@ -187,21 +197,23 @@ def gen_cornell_example(dataDir, dataType):
                 isBodyTracked = body_mat['body'][f, b][0, 0][0][0][0]
                 if isBodyTracked != 1:
                     continue
-                joints = load_joints(f, b, body_mat)
-                bodies.append(joints)
-            bodies = np.array(bodies, dtype=np.float32).flatten()
+                trackingstates, joints = load_joints(f, b, body_mat)
+                joints_list.append(joints)
+                tstates_list.append(trackingstates)
+            joints_list = np.array(joints_list, dtype=np.float32).flatten()
+            tstates_list = np.array(tstates_list, dtype=np.float32).flatten()
 
             # Features
             bytes_image = tf.compat.as_bytes(image)
             feature_image = bytes_feature(bytes_image)
-            feature = gen_feature2(feature_image, bodies, height, width, nb_body)
+            feature = gen_feature2(feature_image, joints_list, tstates_list,
+                                   classes[0], height, width, nb_body)
 
             # Example
             example = tf.train.Example(features=tf.train.Features(feature=feature))
             # Serialize
             writer.write(example.SerializeToString())
     return
-
 
 
 # Variables
@@ -219,7 +231,7 @@ elif "Cornell" in dataDir:
 train_filename = '{}/{}_{}.tfrecords'.format(dataDir, dataType, suffix)
 if os.path.isfile(train_filename):
     choice = input('file {} already exist, overwrite ? [y/n] '.format(train_filename))
-    if not choice in ['y','Y']:
+    if not choice in ['y', 'Y']:
         sys.exit()
 
 # Open TFREcords file
@@ -229,8 +241,6 @@ if "COCO" in dataDir:
     gen_coco_example(dataDir, dataType)
 elif "Cornell" in dataDir:
     gen_cornell_example(dataDir, dataType)
-
-
 
 writer.close()
 sys.stdout.flush()
