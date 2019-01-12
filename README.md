@@ -1,5 +1,5 @@
-# ProjetF4
-Reconnaissance d'activités
+# Research Project - F4
+Activities Recognition
 
 
 YOLOv2:
