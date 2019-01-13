@@ -22,6 +22,15 @@ def error(msg):
     return
 
 
+def check_filename(fname):
+    # TFRecord output filename
+    if os.path.isfile(fname):
+        choice = input('file {} already exist, overwrite ? [y/n] '.format(fname))
+        if not choice in ['y', 'Y']:
+            sys.exit(0)
+    return
+
+
 def parser():
     global dataDir, dataType
     argv = sys.argv
@@ -88,19 +97,21 @@ def gen_feature1(ft_image, bbo, height, width, nb_ob):
     return ft
 
 
-def gen_feature2(ft_image, joints, tstates, aclass, height, width, nb_body):
+def gen_feature2(ft_image, joints, tstates, aclass, bodies_id):
     ft = {'image': ft_image,
-          'height': int64_feature(height),
-          'width': int64_feature(width),
           'class': int64_feature(aclass),
-          'bodies_number': int64_feature(nb_body),
+          'bodies': int64_feature_list(bodies_id),
           'joints': float_feature_list(joints),
-          'trackingStates': float_feature_list(tstates)}
+          'trackingStates': int64_feature_list(tstates)}
     return ft
 
 
 # Generate Example for Coco Dataset
 def gen_coco_example(dataDir, dataType):
+    # Open TFRecords file
+    filename = '{}/{}_coco.tfrecords'.format(dataDir, dataType)
+    check_filename(filename)
+    writer = tf.python_io.TFRecordWriter(filename)
     # Annotations
     annFile = '{}/annotations/instances_{}.json'.format(dataDir, dataType)
     if not os.path.isfile(annFile):
@@ -163,56 +174,104 @@ def gen_coco_example(dataDir, dataType):
         example = tf.train.Example(features=tf.train.Features(feature=feature))
         # Serialize
         writer.write(example.SerializeToString())
+    # Close writer
+    writer.close()
     return
 
 
 # Generate Example for Cornell Dataset
-def gen_cornell_example(dataDir, dataType):
+def gen_cornell_example(dataDir, dataType, split=None):
+    # Open TFRecords file
+    filename = '{}/{}_{}_cornell.tfrecords'.format(dataDir, dataType, split[:split.index('_')])
+    check_filename(filename)
+    writer = tf.python_io.TFRecordWriter(filename)
+
     path = "{}/{}/".format(dataDir, dataType)
     folders = os.listdir(path)
+    if split != None:
+        msplit = loadmat("{}/{}_split.mat".format(dataDir, dataType))
+        folders = [sp[0] for sp in msplit[split][0]]
 
     for fid, folder in enumerate(folders):
         print('[{}/{}]'.format(str(fid), str(len(folders))), end='\r')
         sys.stdout.flush()
-
         if not os.path.isdir(path + folder + '/rgbjpg'):
             error('No "rgbjpg" folder in ' + path + folder)
 
+        # Load annotations
         body_mat = loadmat(path + folder + '/body.mat')
         nb_frames, nb_body = body_mat['body'].shape
+        height, width, channels = None, None, None
+        # ft_list = []
         classes = load_classes(dataDir, dataType, folder)
+        feature_images = []
+        scene_joints = []
+        scene_trackingstates = []
+        scene_bodies = []
         for f in range(nb_frames):
-            tstates_list = []
+            trackingstates = []
             joints_list = []
+            bodies = []
             # Load image
             img_fpath = path + folder + '/rgbjpg/' + str(f + 1).zfill(4) + '.jpg'
             if not os.path.isfile(img_fpath):
                 error('No such file: ' + img_fpath)
                 continue
             imshape, image = load_image(img_fpath)
-            height, width, channels = imshape
+            if None in [height, width, channels]:
+                height, width, channels = imshape
 
             # Load joints coordinates
             for b in range(nb_body):
                 isBodyTracked = body_mat['body'][f, b][0, 0][0][0][0]
                 if isBodyTracked != 1:
                     continue
-                trackingstates, joints = load_joints(f, b, body_mat)
+                tst, joints = load_joints(f, b, body_mat)
                 joints_list.append(joints)
-                tstates_list.append(trackingstates)
-            joints_list = np.array(joints_list, dtype=np.float32).flatten()
-            tstates_list = np.array(tstates_list, dtype=np.float32).flatten()
-
+                trackingstates.append(tst)
+                bodies.append(b)
             # Features
+            if len(bodies) < 1:
+                bodies = [-1]
+            joints_list = np.array(joints_list, dtype=np.float32).flatten()
+            trackingstates = np.array(trackingstates, dtype=np.int64).flatten()
+            bodies = np.array(bodies, dtype=np.int64).flatten()
             bytes_image = tf.compat.as_bytes(image)
             feature_image = bytes_feature(bytes_image)
-            feature = gen_feature2(feature_image, joints_list, tstates_list,
-                                   classes[0], height, width, nb_body)
-
-            # Example
-            example = tf.train.Example(features=tf.train.Features(feature=feature))
-            # Serialize
-            writer.write(example.SerializeToString())
+            feature_images.append(feature_image)
+            scene_joints.append(joints_list)
+            scene_trackingstates.append(trackingstates)
+            scene_bodies.append(bodies)
+            # ft_dict = gen_feature2(feature_image, joints_list, trackingstates,
+            #                        classes[f], bodies)
+            # feature = tf.train.Features(feature=ft_dict)
+            # ft_list.append(feature)
+        # Sequence Example
+        context = tf.train.Features(feature={
+            'name': bytes_feature(folder.encode('utf-8')),
+            'nb_frames': int64_feature(nb_frames),
+            'height': int64_feature(height),
+            'width': int64_feature(width)
+        })
+        # Feature lists
+        fl_classes = tf.train.FeatureList(feature=[int64_feature(c) for c in classes])
+        fl_tstates = tf.train.FeatureList(feature=[int64_feature_list(ts) for ts in scene_trackingstates])
+        fl_bodies = tf.train.FeatureList(feature=[int64_feature_list(b) for b in scene_bodies])
+        fl_images = tf.train.FeatureList(feature=feature_images)
+        fl_joints = tf.train.FeatureList(feature=[float_feature_list(j) for j in scene_joints])
+        feature_list = tf.train.FeatureLists(feature_list={
+            'classes': fl_classes,
+            'trackingStates': fl_tstates,
+            'bodies': fl_bodies,
+            'images': fl_images,
+            'joints': fl_joints
+        })
+        ex = tf.train.SequenceExample(context=context, feature_lists=feature_list)
+        # Serialize
+        writer.write(ex.SerializeToString())
+    # Close writer
+    writer.close()
+    print('\n')
     return
 
 
@@ -222,25 +281,10 @@ dataDir = '/home/amusaal/DATA/Coco'
 dataType = 'val2014'
 parser()
 
-# TFRecord output filename
-suffix = "default"
-if "COCO" in dataDir:
-    suffix = "yolo"
-elif "Cornell" in dataDir:
-    suffix = "cornell"
-train_filename = '{}/{}_{}.tfrecords'.format(dataDir, dataType, suffix)
-if os.path.isfile(train_filename):
-    choice = input('file {} already exist, overwrite ? [y/n] '.format(train_filename))
-    if not choice in ['y', 'Y']:
-        sys.exit()
-
-# Open TFREcords file
-writer = tf.python_io.TFRecordWriter(train_filename)
-
 if "COCO" in dataDir:
     gen_coco_example(dataDir, dataType)
 elif "Cornell" in dataDir:
-    gen_cornell_example(dataDir, dataType)
+    gen_cornell_example(dataDir, dataType, 'train_name')
+    gen_cornell_example(dataDir, dataType, 'test_name')
 
-writer.close()
 sys.stdout.flush()
