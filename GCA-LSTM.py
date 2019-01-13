@@ -61,13 +61,14 @@ def _parse_(serialized_example):
                'trackingStates': tf.VarLenFeature(dtype=tf.int64)
                }
     ctx,features = tf.parse_single_sequence_example(serialized_example,context,feature)
-    # images = [tf.image.decode_jpeg(im, 3) for im in features['images']]
-    images = features['images']
+    images = tf.map_fn(tf.image.decode_jpeg, features['images'], dtype=tf.uint8)
+    images = tf.map_fn(lambda x: tf.reverse(x, axis=[-1]), images, dtype=tf.uint8)
+    # images = features['images']
     joints = tf.sparse_tensor_to_dense(features['joints'], default_value=0)
-    # trackingStates = tf.sparse_tensor_to_dense(features['trackingStates'], default_value=0)
+    trackingStates = tf.sparse_tensor_to_dense(features['trackingStates'], default_value=0)
     # bodies = tf.sparse_tensor_to_dense(features['bodies'], default_value=0)
-    # bodies = tf.cast(features['bodies'], tf.int32)
-    # aclass = tf.cast(features['class'], tf.int32)
+    bodies = tf.cast(features['bodies'], tf.int32)
+    aclasses = tf.cast(features['classes'], tf.int32)
     framename = tf.cast(ctx['name'], tf.string)
     height = tf.cast(ctx['height'], tf.int32)
     width = tf.cast(ctx['width'], tf.int32)
@@ -93,17 +94,55 @@ def _parse_(serialized_example):
     # image = tf.reshape(image, [BATCH_SIZE, HEIGHT, WIDTH, CHANNELS])
 
     # return (image, joints, aclass, bodies, trackingStates)
-    return (images, height, width, nb_frames, framename)
+    return (images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, framename)
 
 
-def load_joints(f,b, bmat):
-    jts = []
-    for j in range(25):
-        jt = {}
-        jt['trackingState'] = bmat['body'][f,b][0, 0][1][0, j][0][0][0][0][0]
-        jt['pcloud'] = bmat['body'][f,b][0, 0][1][0, j][0][0][5][0].tolist()
-        jts.append(jt)
-    return jts
+def parse_labels(classes, scene_joints, scene_trackingStates, scene_bodies, nframe):
+    labels = []
+    for n in range(nframe):
+        label = []
+        nbody = len(scene_bodies[n]) if scene_bodies[n][0] == -1 else 0
+
+        label.append(classes[n])
+    return labels
+
+
+def parse_body(bodies_data):
+    body_list = []
+    for b in range(len(bodies_data)):
+        if bodies_data[b] == -1:
+            body_list.append([-1])
+        bd = []
+        nbb = 0
+        for nb in range(6):
+            if b + nbb >= len(bodies_data):
+                continue
+            if bds[b + nbb] == nb:
+                bd.append(nb)
+                nbb += 1
+        body_list.append(bd)
+    return body_list
+
+
+def parse_joints(joints_data, tstates_data, bodies_data):
+    joints_list = []
+    tstates_list = []
+    j = 0
+    while j < len(joints_data):
+        frame_bodies = bodies_data[j]
+        if frame_bodies == [-1]:
+            joints_list.append([])
+            j += 1
+            continue
+        nbody = len(frame_bodies)
+        ts = []
+        for b in range(nbody):
+            jt = [joints_data[j][3*jo:3*jo+3] for jo in range(25)]
+            ts.append(tstates_data[j])
+            joints_list.append(jt)
+            j += 1
+        tstates_list.append(ts)
+    return joints_list
 
 
 """
@@ -188,11 +227,29 @@ threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 # print('Classes:\t',aclasses.shape)
 # print('Bodies:\t\t',bds.shape)
 # print('TStates:\t',tstates.shape)
-imgs, h, w, nbf, fname = sess.run(next_element)
-print(imgs[0])
+
+# Load scene
+imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+# Pre-process
+fname = fname.decode('UTF-8')
+bds = parse_body(bds)
+
+print(imgs.shape)
 print(h,w,nbf)
 print(fname)
+print('tStates',tStates.shape, tStates)
+# print('Bodies', np.array(bds).shape, bds)
+# print('Classes', ac.shape, ac)
+print('Joints', jts.shape, jts)
+jts = np.array(parse_joints(jts, tStates, bds))
+print('Joints', jts.shape, jts)
 
+
+# cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
+# video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
+# for im in imgs:
+#     video.write(im)
+# video.release()
 
 
 coord.request_stop()
