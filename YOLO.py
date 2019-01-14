@@ -1,6 +1,7 @@
 import os
 import sys
 import cv2
+from time import time
 import matplotlib.pyplot as plt
 import random
 import numpy as np
@@ -11,15 +12,14 @@ from pycocotools.coco import COCO
 #   HYPERPARAMETERS
 # ------------------------
 
-WIDTH = 480
-HEIGHT = 480
+WIDTH = 448
+HEIGHT = 448
 assert WIDTH % 32 == 0, 'Network input size should be mutliple of 32.'
 assert HEIGHT % 32 == 0, 'Network input size should be mutliple of 32.'
-DEPTH = 3
 CHANNELS = 3
-BATCH_SIZE = 1
+BATCH_SIZE = 8
 LEARNING_RATE = 0.001
-NUM_ITERS = 1000
+NUM_ITERS = 50000
 NB_ANCHORS = 5
 GRID_WIDTH = WIDTH // 32
 GRID_HEIGHT = HEIGHT // 32
@@ -38,6 +38,16 @@ CLASSES_ID = [c for c in range(1, 91) if c not in [12, 26, 29, 30, 45, 66, 68, 6
 # ------------------------
 #       TOOLS
 # ------------------------
+
+
+def info(msg, end=None):
+    blue = '\33[36;1m'
+    std = '\33[0m'
+    if end == None:
+        print(blue + msg + std)
+    else:
+        print(blue + msg + std, end=end)
+    return
 
 
 def sigmoid(x, derivative=False):
@@ -69,7 +79,6 @@ def yolo_ground_truth(batch_true_boxes, num_objects):
         for nb in range(num_object):
             box = true_boxes[nb]
             # print("BOX", box)
-            # !TODO Convert Category_ID into Class_ID for one-hot encoding
             category_id, box = int(box[0]), box[1:]
             class_id = CLASSES_ID.index(category_id)
             best_iou = 0
@@ -175,7 +184,7 @@ def _parse_(serialized_example):
     image = tf.image.resize_image_with_crop_or_pad(image=image,
                                                    target_height=HEIGHT,
                                                    target_width=WIDTH)
-    # image = tf.reshape(image, [BATCH_SIZE, HEIGHT, WIDTH, DEPTH])
+    # image = tf.reshape(image, [BATCH_SIZE, HEIGHT, WIDTH, CHANNELS])
     # !TODO: Normaliser images = /255.0
 
     # return (image, [height], [width], [nb_objects], bboxes)
@@ -462,19 +471,22 @@ valid_dataset = "../DATA/Coco/val2014_yolo.tfrecords"
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
 # image, label, bboxes, nb_objects = read_and_decode(filename_queue)
 
+info("Loading Dataset (TFRecords) ...")
 tfrecord_dataset = tf.data.TFRecordDataset(train_dataset)
-tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=10000)
-tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
+# tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=100*BATCH_SIZE)
+tfrecord_dataset = tfrecord_dataset.prefetch(2)
+tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x), num_parallel_calls=16)
+# tfrecord_dataset = tfrecord_dataset.cache()
 # tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
-# pad_shapes = ([None, None, DEPTH], [1], [1], [1], [None], [None, 4])
-pad_shapes = ([None, None, DEPTH], [None, 5], [1])
+# pad_shapes = ([None, None, CHANNELS], [1], [1], [1], [None], [None, 4])
+pad_shapes = ([None, None, CHANNELS], [None, 5], [1])
 tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
-
+input('OK')
 # Add the variable initializer Op.
-init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+# init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
 # Weights initializer
 w_init = tf.contrib.layers.xavier_initializer()
@@ -484,12 +496,12 @@ dct_maps_pl = tf.placeholder(shape=[BATCH_SIZE, GRID_HEIGHT, GRID_WIDTH, NB_ANCH
                              dtype=np.int32, name="dmap_placeholder")
 gt_yolo_maps_pl = tf.placeholder(shape=[BATCH_SIZE, GRID_HEIGHT, GRID_WIDTH, NB_ANCHORS, 5],
                                  dtype=np.float32, name="gt_placeholder")
-image = tf.placeholder(shape=[BATCH_SIZE, HEIGHT, WIDTH, DEPTH], dtype=tf.float32, name='image_placeholder')
+image = tf.placeholder(shape=[BATCH_SIZE, HEIGHT, WIDTH, CHANNELS], dtype=tf.float32, name='image_placeholder')
 loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
 # label = tf.placeholder(shape=[None, GRID_H, GRID_W, NB_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
 
-
 with tf.device('/gpu:1'):
+    info("Defining the graph ...")
     variables = variables_yolo(w_init)
     predictions = yolo(image, variables)
     yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
@@ -502,7 +514,6 @@ with tf.device('/gpu:1'):
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
-
 
 # Create a saver for writing training checkpoints.
 d1 = "../darkflow/built_graph/"
@@ -518,9 +529,12 @@ summary = tf.summary.scalar(name='Loss', tensor=yolo_losses)
 
 
 # Run the session
-sess.run(init_op)
-sess.run(tfrecord_iterator.initializer)
+info('Initializing variables ... ', end='')
+# sess.run(init_op)
+sess.run(tf.local_variables_initializer())
 sess.run(tf.global_variables_initializer())
+sess.run(tfrecord_iterator.initializer)
+info('OK')
 
 writer = tf.summary.FileWriter('./log/yolo', sess.graph)
 
@@ -529,7 +543,7 @@ coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 # Load weights
-load_weights(weights_file)
+# load_weights(weights_file)
 
 # DEBUG
 # describe_model()
@@ -541,8 +555,10 @@ load_weights(weights_file)
 # print(v)
 # print(sess.run(tf.get_variable('batch_normalization_15/moving_mean')))
 
-NUM_ITERS = 1
+NUM_ITERS = 3
 
+# input('Ready ?')
+info("\n\nStarting training:")
 for it in range(NUM_ITERS):
     # Load data
     # imgs, H, W, NO, lbls, bbs = sess.run(next_element)
@@ -555,32 +571,35 @@ for it in range(NUM_ITERS):
     # print(np.array(ground_truth_yolo_maps).shape)
 
     # Forward
-    pred = sess.run(predictions, feed_dict={image: imgs})
+    # pred = sess.run(predictions, feed_dict={image: imgs})
     # detect_box(pred)
     # print(np.array(pred).shape)
 
     # Loss
+    t_start = time()
     _, summary_str, loss = sess.run([train_step, summary, yolo_losses],
                     feed_dict={image: imgs, dct_maps_pl: detection_maps, gt_yolo_maps_pl: ground_truth_yolo_maps})
+    t_chrono = time() - t_start
+    print('Time: {} s'.format(t_chrono))
     print("Iter {}:\t\tAvg Loss={}".format(it,loss / BATCH_SIZE))
 
-    if it + 1 % 10 == 0:
-        writer.add_summary(summary_str, global_step=it + 1)
+    # if it + 1 % 10 == 0:
+    writer.add_summary(summary_str, global_step=it + 1)
     if it + 1 % 1000 == 0:
         saver.save(sess, "./coco_yolov2", global_step=it + 1)
 
 #!TODO Make detection from predictions
 
-for i in range(1):
-    # print('Current batch')
-    img, bbox = imgs[0], detect_box(pred)
-    # img, lbl, bbox, nbo = sess.run([image, label, bboxes, nb_objects])
-    for bb in bbox:
-        x, y = int(bb[0]), int(bb[1])
-        w, h = int(bb[2]), int(bb[3])
-        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    # cv2.imwrite("test/img.jpg", img)
-    plt.imsave("test/img.jpg", img)
+# for i in range(1):
+#     # print('Current batch')
+#     img, bbox = imgs[0], detect_box(pred)
+#     # img, lbl, bbox, nbo = sess.run([image, label, bboxes, nb_objects])
+#     for bb in bbox:
+#         x, y = int(bb[0]), int(bb[1])
+#         w, h = int(bb[2]), int(bb[3])
+#         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+#     # cv2.imwrite("test/img.jpg", img)
+#     plt.imsave("test/img.jpg", img)
 
 coord.request_stop()
 coord.join(threads)
