@@ -2,6 +2,7 @@ import os
 import sys
 import scipy.io as sio
 import tensorflow as tf
+from ST_LSTM import STLSTMCell
 import numpy as np
 import cv2
 
@@ -14,7 +15,7 @@ import cv2
 # WIDTH = 480
 # HEIGHT = 480
 CHANNELS = 3
-BATCH_SIZE = 200
+BATCH_SIZE = 1
 
 
 # ------------------------
@@ -64,15 +65,19 @@ def _parse_(serialized_example):
     images = tf.map_fn(tf.image.decode_jpeg, features['images'], dtype=tf.uint8)
     images = tf.map_fn(lambda x: tf.reverse(x, axis=[-1]), images, dtype=tf.uint8)
     # images = features['images']
-    joints = tf.sparse_tensor_to_dense(features['joints'], default_value=0)
-    trackingStates = tf.sparse_tensor_to_dense(features['trackingStates'], default_value=0)
-    # bodies = tf.sparse_tensor_to_dense(features['bodies'], default_value=0)
+    # joints = tf.sparse.to_dense(features['joints'])
+    # trackingStates = tf.sparse.to_dense(features['trackingStates'])
+    # bodies = tf.sparse.to_dense(features['bodies'], default_value=-1)
     bodies = tf.cast(features['bodies'], tf.int32)
     aclasses = tf.cast(features['classes'], tf.int32)
     framename = tf.cast(ctx['name'], tf.string)
     height = tf.cast(ctx['height'], tf.int32)
     width = tf.cast(ctx['width'], tf.int32)
     nb_frames = tf.cast(ctx['nb_frames'], tf.int32)
+
+    joints = tf.sparse.to_dense(features['joints'])
+    trackingStates = tf.sparse.to_dense(features['trackingStates'])
+    joints = tf.reshape(joints, [nb_frames,25,3])
     # is_object = tf.cast(nb_bodies, tf.bool)
 
     # image_shape = tf.stack([height, width, CHANNELS])
@@ -108,6 +113,11 @@ def parse_labels(classes, scene_joints, scene_trackingStates, scene_bodies, nfra
 
 
 def parse_body(bodies_data):
+    """
+
+    :param bodies_data: List of bodies index in each frame (-1 if nobody)
+    :return:            List of bodies id in each frame reshaped
+    """
     body_list = []
     for b in range(len(bodies_data)):
         if bodies_data[b] == -1:
@@ -117,7 +127,7 @@ def parse_body(bodies_data):
         for nb in range(6):
             if b + nbb >= len(bodies_data):
                 continue
-            if bds[b + nbb] == nb:
+            if bodies_data[b + nbb] == nb:
                 bd.append(nb)
                 nbb += 1
         body_list.append(bd)
@@ -143,6 +153,63 @@ def parse_joints(joints_data, tstates_data, bodies_data):
             j += 1
         tstates_list.append(ts)
     return joints_list
+
+
+def parse_data(joints_data, bodies_data):
+    joints_dict = {}
+    # joints_list = []
+    # tstates_list = []
+    b, fr = 0, 0
+    while b < len(bodies_data):
+        if bodies_data[b] == -1:
+            fr += 1
+            b += 1
+            continue
+        # bd = []
+        nbb = 0
+        for nb in range(6):
+            if b + nbb >= len(bodies_data):
+                nbb += 1
+                continue
+            if bodies_data[b + nbb] == nb:
+                if not nb in joints_dict.keys():
+                    joints_dict[nb] = fr * [[0,0,0]]
+                if len(joints_dict[nb]) != fr:
+                    joints_dict[nb] += (fr-len(joints_dict[nb])) * [[0,0,0]]
+                # jt = [joints_data[b + nbb][3 * jo:3 * jo + 3].tolist() for jo in range(25)]
+                jt = joints_data[fr][nbb*25:(nbb+1)*25].tolist()
+                joints_dict[nb].append(jt)
+                # bd.append(b)
+                nbb += 1
+        fr += 1
+        b += nbb
+        # b += 1
+    joints_list = np.zeros((len(joints_dict.keys()), fr, 25, 3))
+    for e,k in enumerate(joints_dict.keys()):
+        joints_list[e,:,:,:] = np.array(joints_dict[k]).resize(fr,25,3)
+    return joints_list
+
+# ------------------------
+#          NETWORK
+# ------------------------
+
+
+def build_lstm(lstm_sizes, inputs, keep_prob_, batch_size):
+    """
+    Create the LSTM layers
+    """
+    # lstms = [tf.contrib.rnn.BasicLSTMCell(size) for size in lstm_sizes]
+    lstms = [STLSTMCell(size) for size in lstm_sizes]
+    # Add dropout to the cell
+    # drops = [tf.contrib.rnn.DropoutWrapper(lstm, output_keep_prob=keep_prob_) for lstm in lstms]
+    # Stack up multiple LSTM layers, for deep learning
+    cell = tf.contrib.rnn.MultiRNNCell(lstms)
+    # Getting an initial state of all zeros
+    initial_state = cell.zero_state(batch_size, tf.float32)
+
+    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, initial_state=initial_state)
+
+    return initial_state, lstm_outputs, cell, final_state
 
 
 """
@@ -201,10 +268,19 @@ tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
 
+
+# Define variables
+inputs  = tf.placeholder(tf.float32, (None, 25, 3))  # (time, batch, in)
+# outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
+
+
+# Define the graph
+init_state, outputs, cell, final_state = build_lstm([25], inputs, None, BATCH_SIZE)
+
+
+
 # Add the variable initializer Op.
 init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
-
-
 
 # Create the session
 config = tf.ConfigProto()
@@ -216,8 +292,8 @@ sess = tf.Session(config=config)
 sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
 
-coord = tf.train.Coordinator()
-threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+# coord = tf.train.Coordinator()
+# threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 
 # TEST
@@ -232,17 +308,22 @@ threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
 # Pre-process
 fname = fname.decode('UTF-8')
-bds = parse_body(bds)
-
+print(jts.shape)
+jts_dict = parse_data(jts, bds)
+# bds = parse_body(bds)
+# jts = np.array(parse_joints(jts, tStates, bds))
 print(imgs.shape)
 print(h,w,nbf)
 print(fname)
-print('tStates',tStates.shape, tStates)
+print(jts.shape)
+# print(jts_dict[list(jts_dict.keys())[0]][0])
+# print('tStates',tStates.shape, tStates)
 # print('Bodies', np.array(bds).shape, bds)
 # print('Classes', ac.shape, ac)
-print('Joints', jts.shape, jts)
-jts = np.array(parse_joints(jts, tStates, bds))
-print('Joints', jts.shape, jts)
+# print('Joints', jts.shape, jts)
+
+
+init, out, ce, fin = sess.run([init_state, outputs, cell, final_state], feed_dict={inputs:jts[0]})
 
 
 # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
@@ -252,8 +333,8 @@ print('Joints', jts.shape, jts)
 # video.release()
 
 
-coord.request_stop()
-coord.join(threads)
+# coord.request_stop()
+# coord.join(threads)
 
 # Close the session
 sess.close()
