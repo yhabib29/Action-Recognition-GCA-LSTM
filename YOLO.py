@@ -19,13 +19,13 @@ assert HEIGHT % 32 == 0, 'Network input size should be mutliple of 32.'
 CHANNELS = 3
 BATCH_SIZE = 8
 LEARNING_RATE = 0.001
-NUM_ITERS = 50000
+NUM_ITERS = 45000
 NB_ANCHORS = 5
 GRID_WIDTH = WIDTH // 32
 GRID_HEIGHT = HEIGHT // 32
 LEAKY = 0.1
 LCOORD = 5
-LNOOBJ = 1
+LNOOBJ = 0.5
 ANCHORS = np.array(
     [[0.57273, 0.677385], [1.87446, 2.06253], [3.33843, 5.47434], [7.88282, 3.52778], [9.77052, 9.16828]])
 
@@ -83,8 +83,9 @@ def yolo_ground_truth(batch_true_boxes, num_objects):
             class_id = CLASSES_ID.index(category_id)
             best_iou = 0
             best_anchor = 0
-            box = box[0:4] * np.array([GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT,
-                                       GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT])
+            # box = box[0:4] * np.array([GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT,
+            #                            GRID_WIDTH / WIDTH, GRID_HEIGHT / HEIGHT])
+            box = box[0:4] * np.array([GRID_WIDTH, GRID_HEIGHT, GRID_WIDTH, GRID_HEIGHT])
             cx = int(box[0]) if (box[0] < GRID_WIDTH) else (GRID_WIDTH - 1)
             cy = int(box[1]) if (box[1] < GRID_HEIGHT) else (GRID_HEIGHT - 1)
             for k, anchor in enumerate(ANCHORS):
@@ -117,30 +118,38 @@ def yolo_ground_truth(batch_true_boxes, num_objects):
     return detection_mask, gt_yolo_map
 
 
-def detect_box(dmap):
+def detect_box(dmap, im=None):
     #!TODO Check
-    print(dmap.shape)
-    bbs = []
-    gw,gh = dmap.shape[1:3]
-    for cx in range(gw):
-        for cy in range(gh):
-            for a in range(5):
-                anchor = dmap[0,cx,cy,a]
-                if sigmoid(anchor[4]) > 0.5:
-                    factor_w = WIDTH / GRID_WIDTH
-                    factor_h = HEIGHT / GRID_HEIGHT
-                    bx = (cx + sigmoid(anchor[0])) * factor_w
-                    by = (cy + sigmoid(anchor[1])) * factor_h
-                    bw = (ANCHORS[a][0] * np.exp(anchor[2])) * factor_w
-                    bh = (ANCHORS[a][1] * np.exp(anchor[2])) * factor_h
-                    cid = anchor[5:].argmax()
-                    score = softmax(anchor[cid])
-                    if not score > 0.25:
-                        continue
-                    lbl = CLASSES_ID[cid]
-                    bbs.append([bx, by, bw, bh, score, lbl])
-    print(bbs)
-    return bbs
+    ims = []
+    # print(dmap.shape)
+    batch_bbs = []
+    batch_len,gw,gh = dmap.shape[:3]
+    for k in range(batch_len):
+        imb = im[k].copy()
+        bbs = []
+        for cx in range(gw):
+            for cy in range(gh):
+                for a in range(5):
+                    anchor = dmap[k,cy,cx,a]
+                    if sigmoid(anchor[4]) > 0.5:
+                        factor_w = WIDTH / GRID_WIDTH
+                        factor_h = HEIGHT / GRID_HEIGHT
+                        bx = (cx + sigmoid(anchor[0])) * factor_w
+                        by = (cy + sigmoid(anchor[1])) * factor_h
+                        bw = (ANCHORS[a][0] * np.exp(anchor[2])) * factor_w
+                        bh = (ANCHORS[a][1] * np.exp(anchor[3])) * factor_h
+                        cid = anchor[5:].argmax()
+                        score = softmax(anchor[cid])
+                        if not score > 0.5:
+                            continue
+                        lbl = CLASSES_ID[cid]
+                        bbs.append([bx, by, bw, bh, score, lbl])
+                        if im is not None:
+                            imb = cv2.rectangle(imb,(int(bx),int(by)), (int(bw),int(bh)),2)
+        ims.append(imb)
+        batch_bbs.append(bbs)
+    # print(np.array(bbs).shape)
+    return batch_bbs, ims
 
 # ------------------------
 #          DATA
@@ -148,20 +157,21 @@ def detect_box(dmap):
 
 
 def _parse_(serialized_example):
-    """feature = {'image': tf.FixedLenFeature((), tf.string),
+    # feature = {'image': tf.FixedLenFeature((), tf.string),
+    #            'height': tf.FixedLenFeature([], tf.int64),
+    #            'width': tf.FixedLenFeature([], tf.int64),
+    #            'objects_number': tf.FixedLenFeature([], tf.int64),
+    #            'bboxes': tf.VarLenFeature(tf.float32)}
+    context = {'image': tf.FixedLenFeature((), tf.string),
                'height': tf.FixedLenFeature([], tf.int64),
                'width': tf.FixedLenFeature([], tf.int64),
-               'objects_number': tf.FixedLenFeature([], tf.int64),
-               'class': tf.VarLenFeature(tf.int64),
-               'bboxes': tf.VarLenFeature(tf.float32)}"""
-    feature = {'image': tf.FixedLenFeature((), tf.string),
-               'height': tf.FixedLenFeature([], tf.int64),
-               'width': tf.FixedLenFeature([], tf.int64),
-               'objects_number': tf.FixedLenFeature([], tf.int64),
-               'bboxes': tf.VarLenFeature(tf.float32)}
-    features = tf.parse_single_example(serialized_example, feature)
+               'objects_number': tf.FixedLenFeature([], tf.int64)}
+    feature = {'bboxes': tf.VarLenFeature(dtype=tf.float32)}
+    # features = tf.parse_single_example(serialized_example, feature)
+    features, fbboxes = tf.parse_single_sequence_example(serialized_example, context, feature)
     image = tf.image.decode_jpeg(features['image'], 3)
-    bboxes = tf.sparse_tensor_to_dense(features['bboxes'], default_value=0)
+    bboxes = tf.sparse_tensor_to_dense(fbboxes['bboxes'], default_value=0)
+    # bboxes = tf.cast(fbboxes['bboxes'], tf.float32)
     # labels = tf.sparse_tensor_to_dense(features['class'], default_value=0)  # tf.decode_raw
     height = tf.cast(features['height'], tf.int32)
     width = tf.cast(features['width'], tf.int32)
@@ -169,13 +179,13 @@ def _parse_(serialized_example):
     is_object = tf.cast(nb_objects, tf.bool)
 
     # image_shape = tf.stack([height, width, 3])
-    bboxes_shape = tf.stack([nb_objects, 5])
+    # bboxes_shape = tf.stack([nb_objects, 5])
     # label_shape = tf.stack([nb_objects])  # ,1)
 
     image = tf.reshape(image, [height, width, 3])
-    bboxes = tf.cond(is_object,
-                     lambda: tf.reshape(bboxes, bboxes_shape),
-                     lambda: tf.constant(-1.0))
+    # bboxes = tf.cond(is_object,
+    #                  lambda: tf.reshape(bboxes, bboxes_shape),
+    #                  lambda: tf.constant(-1.0))
     # labels = tf.cond(is_object,
     #                  lambda: tf.reshape(labels, label_shape),
     #                  lambda: tf.constant(-1, dtype=tf.int64))
@@ -372,6 +382,7 @@ def yolo_loss(pred, detection_map, ground_truth):
 
     with tf.name_scope('lab'):
         masked_label_xy = masked_label[..., 0:2]
+        # !TODO: Log of masked_label
         masked_label_wh = tf.sqrt(masked_label[..., 2:4])
         masked_label_c = masked_label[..., 4:]
         masked_label_c_vec = tf.reshape(tf.one_hot(tf.cast(masked_label_c, tf.int32), depth=CLASSES),
@@ -391,7 +402,7 @@ def yolo_loss(pred, detection_map, ground_truth):
 
         loss = LCOORD * (loss_xy + loss_wh) + loss_obj + LNOOBJ * loss_no_obj + loss_c
 
-    return loss
+    return loss, (loss_xy, loss_wh, loss_obj, loss_no_obj, loss_c)
 
 
 def yolo(data, vars):
@@ -467,24 +478,26 @@ def get_variables_values(sess):
 
 # TFRecords dataset paths
 train_dataset = "../DATA/Coco/train2014_yolo.tfrecords"
-valid_dataset = "../DATA/Coco/val2014_yolo.tfrecords"
+valid_dataset = "../DATA/Coco/val2014_coco.tfrecords"
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
 # image, label, bboxes, nb_objects = read_and_decode(filename_queue)
 
 info("Loading Dataset (TFRecords) ...")
-tfrecord_dataset = tf.data.TFRecordDataset(train_dataset)
-# tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=100*BATCH_SIZE)
-tfrecord_dataset = tfrecord_dataset.prefetch(2)
+# with tf.device('/cpu:0'):
+tfrecord_dataset = tf.data.TFRecordDataset(valid_dataset)
+tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=100*BATCH_SIZE)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x), num_parallel_calls=16)
 # tfrecord_dataset = tfrecord_dataset.cache()
 # tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
 # pad_shapes = ([None, None, CHANNELS], [1], [1], [1], [None], [None, 4])
 pad_shapes = ([None, None, CHANNELS], [None, 5], [1])
+# pad_shapes = ([None, None, CHANNELS], [GRID_HEIGHT, GRID_WIDTH, 5, 1], [GRID_HEIGHT, GRID_WIDTH, 5, 5])
 tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
+# tfrecord_dataset = tfrecord_dataset.prefetch(1)
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
-input('OK')
+
 # Add the variable initializer Op.
 # init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
@@ -500,15 +513,15 @@ image = tf.placeholder(shape=[BATCH_SIZE, HEIGHT, WIDTH, CHANNELS], dtype=tf.flo
 loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
 # label = tf.placeholder(shape=[None, GRID_H, GRID_W, NB_ANCHORS, 6], dtype=tf.float32, name='label_palceholder')
 
-with tf.device('/gpu:1'):
-    info("Defining the graph ...")
-    variables = variables_yolo(w_init)
-    predictions = yolo(image, variables)
-    yolo_losses = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
-    opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-    with tf.control_dependencies(update_ops):
-        train_step = opt.minimize(yolo_losses)
+# with tf.device('/gpu:1'):
+info("Defining the graph ...")
+variables = variables_yolo(w_init)
+predictions = yolo(image, variables)
+yolo_losses, etc = yolo_loss(predictions, dct_maps_pl, gt_yolo_maps_pl)
+opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
+update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+with tf.control_dependencies(update_ops):
+    train_step = opt.minimize(yolo_losses)
 
 # Create the session
 config = tf.ConfigProto()
@@ -526,6 +539,7 @@ saver = tf.train.Saver(max_to_keep=4)
 
 # Log
 summary = tf.summary.scalar(name='Loss', tensor=yolo_losses)
+summary_image = tf.summary.image("Images", image)
 
 
 # Run the session
@@ -534,13 +548,12 @@ info('Initializing variables ... ', end='')
 sess.run(tf.local_variables_initializer())
 sess.run(tf.global_variables_initializer())
 sess.run(tfrecord_iterator.initializer)
-info('OK')
 
 writer = tf.summary.FileWriter('./log/yolo', sess.graph)
 
 
-coord = tf.train.Coordinator()
-threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+# coord = tf.train.Coordinator()
+# threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 # Load weights
 # load_weights(weights_file)
@@ -555,7 +568,7 @@ threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 # print(v)
 # print(sess.run(tf.get_variable('batch_normalization_15/moving_mean')))
 
-NUM_ITERS = 3
+# NUM_ITERS = 100
 
 # input('Ready ?')
 info("\n\nStarting training:")
@@ -563,25 +576,30 @@ for it in range(NUM_ITERS):
     # Load data
     # imgs, H, W, NO, lbls, bbs = sess.run(next_element)
     imgs, bbs, NO = sess.run(next_element)
-    # print(NO)
+    # imgs, detection_maps, ground_truth_yolo_maps = sess.run(next_element)
+    # print(bbs.shape)
 
     # Ground truth maps
+    # with tf.device('/cpu:0'):
     detection_maps, ground_truth_yolo_maps = yolo_ground_truth(np.array(bbs), NO)
     # print(np.array(detection_maps).shape)
     # print(np.array(ground_truth_yolo_maps).shape)
 
     # Forward
     # pred = sess.run(predictions, feed_dict={image: imgs})
-    # detect_box(pred)
+    # db,di = detect_box(pred, imgs)
+    # im_summary = sess.run(summary_image, feed_dict={image: di})
+    # writer.add_summary(im_summary, global_step=it + 1)
     # print(np.array(pred).shape)
 
     # Loss
     t_start = time()
-    _, summary_str, loss = sess.run([train_step, summary, yolo_losses],
+    _, summary_str, loss, letc = sess.run([train_step, summary, yolo_losses, etc],
                     feed_dict={image: imgs, dct_maps_pl: detection_maps, gt_yolo_maps_pl: ground_truth_yolo_maps})
     t_chrono = time() - t_start
     print('Time: {} s'.format(t_chrono))
     print("Iter {}:\t\tAvg Loss={}".format(it,loss / BATCH_SIZE))
+    print("Losses ", letc)
 
     # if it + 1 % 10 == 0:
     writer.add_summary(summary_str, global_step=it + 1)
@@ -601,8 +619,8 @@ for it in range(NUM_ITERS):
 #     # cv2.imwrite("test/img.jpg", img)
 #     plt.imsave("test/img.jpg", img)
 
-coord.request_stop()
-coord.join(threads)
+# coord.request_stop()
+# coord.join(threads)
 
 # Save weights
 save_path = saver.save(sess, "./coco_yolov2.ckpt")

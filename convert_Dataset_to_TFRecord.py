@@ -48,8 +48,8 @@ def parser():
 def load_image(filename):
     img = cv2.imread(filename)
     s = img.shape
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32)
+    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # img = img.astype(np.float32)
     # img = cv2.imencode('.jpg', img)[1]
     f = open(filename, "rb")
     img = f.read()
@@ -88,12 +88,11 @@ def bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
 
-def gen_feature1(ft_image, bbo, height, width, nb_ob):
+def gen_feature1(ft_image, height, width, nb_ob):
     ft = {'image': ft_image,
           'height': int64_feature(height),
           'width': int64_feature(width),
-          'objects_number': int64_feature(nb_ob),
-          'bboxes': float_feature_list(bbo)}
+          'objects_number': int64_feature(nb_ob)}
     return ft
 
 
@@ -136,42 +135,32 @@ def gen_coco_example(dataDir, dataType):
 
         # Labels
         bbox = []
-        xmin, ymin, xmax, ymax = [], [], [], []
         nb_ob = 0
         annIds = coco.getAnnIds([im_id])
         for a in coco.loadAnns(annIds):
             label = a['category_id']
-            bbox.append([label] + a['bbox'])
+            bb = np.array(a['bbox']) / np.array((width,height,width,height))
+            bbox.append([label] + bb.tolist())
             nb_ob += 1
         if not len(bbox) > 0:
             continue
-        bbox = np.array(bbox, dtype=np.float32).flatten()
+        bbox = np.array(bbox, dtype=np.float32)#.flatten()
 
         # Features
         # bytes_image = tf.compat.as_bytes(image.tostring())
         bytes_image = tf.compat.as_bytes(image)
         feature_image = bytes_feature(bytes_image)
 
-        feature = gen_feature1(feature_image, bbox, height, width, nb_ob)
-        """feature = { 'image': feature_image,
-                    'height': int64_feature(height),
-                    'width': int64_feature(width),
-                    'objects_number': int64_feature(nb_ob),
-                    'class': int64_feature_list(label),
-                    'bboxes': float_feature_list(bbox)}"""
-        """feature = { 'image': feature_image,
-                    'height': int64_feature(height),
-                    'width': int64_feature(width),
-                    'channels': int64_feature(channels),
-                    'objects_number': int64_feature(nb_ob),
-                    'class': int64_feature_list(label),
-                    'xmin': float_feature_list(xmin),
-                    'ymin': float_feature_list(ymin),
-                    'xmax': float_feature_list(xmax),
-                    'ymax': float_feature_list(ymax)}"""
+        feature = gen_feature1(feature_image, height, width, nb_ob)
+
+        # Feature list
+        context = tf.train.Features(feature=feature)
+        fl_bboxes = tf.train.FeatureList(feature=[float_feature_list(bbo) for bbo in bbox])
+        feature_list = tf.train.FeatureLists(feature_list={'bboxes': fl_bboxes})
 
         # Example
-        example = tf.train.Example(features=tf.train.Features(feature=feature))
+        # example = tf.train.Example(features=tf.train.Features(feature=feature))
+        example = tf.train.SequenceExample(context=context, feature_lists=feature_list)
         # Serialize
         writer.write(example.SerializeToString())
     # Close writer
@@ -281,7 +270,7 @@ dataDir = '/home/amusaal/DATA/Coco'
 dataType = 'val2014'
 parser()
 
-if "COCO" in dataDir:
+if "Coco" in dataDir:
     gen_coco_example(dataDir, dataType)
 elif "Cornell" in dataDir:
     gen_cornell_example(dataDir, dataType, 'train_name')
