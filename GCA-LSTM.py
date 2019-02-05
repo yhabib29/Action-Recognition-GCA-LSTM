@@ -2,7 +2,7 @@ import os
 import sys
 import scipy.io as sio
 import tensorflow as tf
-from ST_LSTM import STLSTMCell
+from ST_LSTM import STLSTMCell, stlstm_loop #, STLSTMStateTuple
 import numpy as np
 import cv2
 
@@ -156,6 +156,12 @@ def parse_joints(joints_data, tstates_data, bodies_data):
 
 
 def parse_data(joints_data, bodies_data):
+    """
+
+    :param joints_data:
+    :param bodies_data:
+    :return: joints_list    np.array of shape (body,frame,joint,3)
+    """
     joints_dict = {}
     # joints_list = []
     # tstates_list = []
@@ -199,17 +205,26 @@ def build_lstm(lstm_sizes, inputs, keep_prob_, batch_size):
     Create the LSTM layers
     """
     # lstms = [tf.contrib.rnn.BasicLSTMCell(size) for size in lstm_sizes]
-    lstms = [STLSTMCell(size) for size in lstm_sizes]
+    # lstms = [STLSTMCell(size) for size in lstm_sizes]
+    lstms = [tf.nn.rnn_cell.LSTMCell(size) for size in lstm_sizes]
+
     # Add dropout to the cell
     # drops = [tf.contrib.rnn.DropoutWrapper(lstm, output_keep_prob=keep_prob_) for lstm in lstms]
+
     # Stack up multiple LSTM layers, for deep learning
-    cell = tf.contrib.rnn.MultiRNNCell(lstms)
+    # cell = tf.contrib.rnn.MultiRNNCell(lstms)
+    cell = tf.nn.rnn_cell.MultiRNNCell(lstms)
+
     # Getting an initial state of all zeros
     initial_state = cell.zero_state(batch_size, tf.float32)
+    # sc = tf.nn.rnn_cell.LSTMStateTuple(tf.zeros([1, lstm_sizes[0]], tf.float32),tf.zeros([1, lstm_sizes[0]], tf.float32))
+    # sh = tf.nn.rnn_cell.LSTMStateTuple(tf.zeros([1, lstm_sizes[0]], tf.float32),tf.zeros([1, lstm_sizes[0]], tf.float32))
+    # initial_state = (tf.zeros([1, lstm_sizes[0]*2], tf.float32),tf.zeros([1, lstm_sizes[0]*2], tf.float32))
 
-    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, initial_state=initial_state)
+    # lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, initial_state=initial_state)
+    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, dtype=tf.float32)
 
-    return initial_state, lstm_outputs, cell, final_state
+    return initial_state, lstm_outputs, final_state, inputs
 
 
 """
@@ -270,13 +285,14 @@ next_element = tfrecord_iterator.get_next()
 
 
 # Define variables
-inputs  = tf.placeholder(tf.float32, (None, 25, 3))  # (time, batch, in)
+# inputs = tf.placeholder(tf.float32, (None, None, 3))  # (time, batch, features, channels) - (time,batch,in)
+inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, 25, 3))  # (time, batch, features, channels) - (time,batch,in)
 # outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
 
 
 # Define the graph
-init_state, outputs, cell, final_state = build_lstm([25], inputs, None, BATCH_SIZE)
-
+# init_state, outputs, final_state, inp = build_lstm([16], inputs, None, BATCH_SIZE)
+outputs, states = stlstm_loop([16], inputs)
 
 
 # Add the variable initializer Op.
@@ -308,23 +324,31 @@ sess.run(tfrecord_iterator.initializer)
 imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
 # Pre-process
 fname = fname.decode('UTF-8')
-print(jts.shape)
-jts_dict = parse_data(jts, bds)
+# print(jts.shape)
+jts = parse_data(jts, bds)
 # bds = parse_body(bds)
 # jts = np.array(parse_joints(jts, tStates, bds))
 print(imgs.shape)
 print(h,w,nbf)
 print(fname)
 print(jts.shape)
-# print(jts_dict[list(jts_dict.keys())[0]][0])
+# print(jts_dict[list(jts_dict.keys())[0]].shape)
 # print('tStates',tStates.shape, tStates)
 # print('Bodies', np.array(bds).shape, bds)
 # print('Classes', ac.shape, ac)
 # print('Joints', jts.shape, jts)
 
-
-init, out, ce, fin = sess.run([init_state, outputs, cell, final_state], feed_dict={inputs:jts[0]})
-
+# For now use only one body
+jts = jts[0]
+if len(jts.shape) == 3:
+    jts = jts.reshape((1,) + jts.shape)
+    # jts = np.swapaxes(jts,0,1)
+    # jts = np.swapaxes(jts, 1, 2)
+print(jts.shape)    # shape = (frames,25,batch,3)
+# init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
+# print('\n\n',inps.shape,np.array(out).shape)
+out, sta = sess.run([outputs, states], feed_dict={inputs:jts})
+print(out.shape,sta.shape)
 
 # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
 # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
