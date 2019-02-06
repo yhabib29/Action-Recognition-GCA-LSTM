@@ -23,7 +23,7 @@ def normalization(tens, scope=None):
     m, v = tf.nn.moments(tens, [1], keep_dims=True)
     if not isinstance(scope, str):
         scope = ''
-    with tf.variable_scope(scope + 'norm'):
+    with tf.variable_scope(scope + 'norm', reuse=tf.AUTO_REUSE):
         scale = tf.get_variable('scale',
                                 shape=[tens.get_shape()[1]],
                                 initializer=tf.constant_initializer(1))
@@ -134,8 +134,7 @@ class STLSTMCell(LayerRNNCell):
             raise ValueError("Expected inputs_shape to be known")
         else:
             if not self.built:
-                self.build(input_shape)
-
+                self.build(input_shape,name)
 
     @property
     def state_size(self):
@@ -145,24 +144,28 @@ class STLSTMCell(LayerRNNCell):
     def output_size(self):
         return self._output_size
 
-    def build(self, inputs_shape):
+    def build(self, inputs_shape, name=None):
+        wname = _WEIGHTS_VARIABLE_NAME
+        bname = _BIAS_VARIABLE_NAME
+        if not name is None:
+            wname += "_" + name
+            bname += "_" + name
         if inputs_shape[-1].value is None:
             raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
                              % str(inputs_shape))
 
         input_depth = inputs_shape[-1].value  # Number of input channels
         h_depth = self._num_units
+        wshape = [input_depth + 2 * h_depth, 5 * self._num_units]
 
-        self._kernel = self.add_variable(
-            _WEIGHTS_VARIABLE_NAME,
-            shape=[input_depth + 2 * h_depth, 5 * self._num_units],
+        self._kernel = self.add_variable(wname,
+            shape=wshape,
             initializer=self._initializer)
         if self.dtype is None:
             initializer = init_ops.zeros_initializer
         else:
             initializer = init_ops.zeros_initializer(dtype=self.dtype)
-        self._bias = self.add_variable(
-            _BIAS_VARIABLE_NAME,
+        self._bias = self.add_variable(bname,
             shape=[5 * self._num_units],
             initializer=initializer)
         self.built = True
@@ -229,7 +232,7 @@ class STLSTMCell(LayerRNNCell):
             return h, new_state
 
 
-def stlstm_loop(lstm_size, input_data, scope_n="layer1"):
+def stlstm_loop(lstm_size, input_data, do_norm=False):
     """https://github.com/philipperemy/tensorflow-multi-dimensional-lstm/blob/master/md_lstm.py
     Implements naive multi dimension recurrent neural networks
     @param lstm_size: the hidden units
@@ -241,11 +244,20 @@ def stlstm_loop(lstm_size, input_data, scope_n="layer1"):
     returns [batch,h/sh[0],w/sh[1],lstm_size] the output of the lstm
     """
 
-    with tf.variable_scope("ST-LSTMCell-" + scope_n):
+    with tf.variable_scope("ST-LSTM"):
         # Create multidimensional cell with selected size
-        cell = STLSTMCell(lstm_size[0], input_shape=input_data.get_shape(),
-                          initializer=tf.truncated_normal_initializer())
-        #
+        cell = STLSTMCell(lstm_size[0],
+                          input_shape=input_data.get_shape(),
+                          initializer=tf.truncated_normal_initializer,
+                          name="layer1",
+                          do_norm=do_norm)
+
+        cell2 = STLSTMCell(lstm_size[1],
+                           input_shape=tf.TensorShape([lstm_size[0]]),
+                           initializer=tf.truncated_normal_initializer,
+                           name="layer2",
+                           do_norm=do_norm)
+
         # Get the shape of the input (batch_size, x, y, channels)
         # shape = input_data.get_shape().as_list()
         shape = tf.shape(input_data)
@@ -260,42 +272,12 @@ def stlstm_loop(lstm_size, input_data, scope_n="layer1"):
         # ! TODO: Check difference with batch_size
         # batch_size_runtime = tf.shape(input_data)[0]
         #
-        #         # If the input cannot be exactly sampled by the window, we patch it with zeros
-        #         if X_dim % X_win != 0:
-        #             # Get offset size
-        #             offset = tf.zeros([batch_size_runtime, X_win - (X_dim % X_win), Y_dim, channels])
-        #             # Concatenate X dimension
-        #             input_data = tf.concat(axis=1, values=[input_data, offset])
-        #             # Get new shape
-        #             shape = input_data.get_shape().as_list()
-        #             # Update shape value
-        #             X_dim = shape[1]
-        #
-        #         # The same but for Y axis
-        #         if Y_dim % Y_win != 0:
-        #             # Get offset size
-        #             offset = tf.zeros([batch_size_runtime, X_dim, Y_win - (Y_dim % Y_win), channels])
-        #             # Concatenate Y dimension
-        #             input_data = tf.concat(axis=2, values=[input_data, offset])
-        #             # Get new shape
-        #             shape = input_data.get_shape().as_list()
-        #             # Update shape value
-        #             Y_dim = shape[2]
-        #
-        #         # Get the steps to perform in X and Y axis
-        #         h, w = int(X_dim / X_win), int(Y_dim / Y_win)
-        #
         # Get the number of features (total number of input values per step)
         # features = S_dim * channels
 
         # The batch size is inferred from the tensor size
         x = tf.reshape(input_data, [batch_size, T_dim, S_dim, channels])
-        #
-        #         # Reverse the selected dimensions
-        #         if dims is not None:
-        #             assert dims[0] is False and dims[3] is False
-        #             x = tf.reverse(x, dims)
-        #
+
         # Reorder inputs to (t, s, batch_size, features) - t=T_dim, s=S_dim
         x = tf.transpose(x, [1, 2, 0, 3])
         # Reshape to a one dimensional tensor of (t*s*batch_size , features)
@@ -307,13 +289,17 @@ def stlstm_loop(lstm_size, input_data, scope_n="layer1"):
         inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array', dynamic_size=True,
                                    infer_shape=False)
         inputs_ta = inputs_ta.unstack(x)
-        states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array', clear_after_read=False)
-        outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array')
+        states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array_1', clear_after_read=False)
+        outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array_1')
+        states_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array2', clear_after_read=False)
+        outputs_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array2')
 
         # initial cell hidden states
         # Write to the last position of the array, the LSTMStateTuple filled with zeros
         states_ta = states_ta.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
                                                       tf.zeros([batch_size, lstm_size[0]], tf.float32)))
+        states_ta2 = states_ta2.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[1]], tf.float32),
+                                                                  tf.zeros([batch_size, lstm_size[1]], tf.float32)))
 
         # Function to get the previous joints id (cs_prev,hs_prev)
         def get_prevS(t_, w_=1):
@@ -331,50 +317,85 @@ def stlstm_loop(lstm_size, input_data, scope_n="layer1"):
         zero = tf.constant(0)
 
         # Body of the while loop operation that applies the MD LSTM
-        def body(id_, outputs_ta_, states_ta_):
+        def body(id_, outputs_ta_, states_ta_, outputs_ta2_, states_ta2_):
             # If the current position is less or equal than the width, we are in the first row
-            # and we need to read the zero state we added in row (h*w).
+            # so we read the zero state we added before.
             # If not, get the sample located at a width distance.
-            prevstate_S = tf.cond(tf.less_equal(id_, S_dim),
+            prevstate_T = tf.cond(tf.less_equal(id_, S_dim),
                                   lambda: states_ta_.read(T_dim * S_dim),  # first row = zero state
                                   lambda: states_ta_.read(get_prevT(id_, S_dim)))  # other rows = previous time id (t-1)
 
             # If it is the first step we read the zero state if not we read the inmediate last
-            prevstate_T = tf.cond(tf.less(zero, tf.mod(id_, S_dim)),
+            prevstate_S = tf.cond(tf.less(zero, tf.mod(id_, S_dim)),
                                   lambda: states_ta_.read(get_prevS(id_)),  # get previous joint state id (j-1)
                                   lambda: states_ta_.read(T_dim * S_dim))  # first joint - get zero state !TODO: use the good joint
 
             # We build the input state in both dimensions
             current_state = prevstate_S[0], prevstate_T[0], prevstate_S[1], prevstate_T[1]
             # Now we calculate the hidden state and the new cell state
-            # print(inputs_ta.read(id_))
             out, state = cell(inputs_ta.read(id_), current_state)
             # We write the output to the output tensor array
             outputs_ta_ = outputs_ta_.write(id_, out)
             # And save the output state to the state tensor array
             states_ta_ = states_ta_.write(id_, state)
-            # states_ta_ = states_ta_.write(tf.mod(id_, S_dim), state)
-            # states_ta_ = states_ta_.write(S_dim + tf.mod(id_, S_dim), state)
+
+            #----------------
+            # LSTM 2nd layer
+            # Process prevStates for the 2nd LSTM layer
+            prevstate_T2 = tf.cond(tf.less_equal(id_, S_dim),
+                                  lambda: states_ta2_.read(T_dim * S_dim),  # first row = zero state
+                                  lambda: states_ta2_.read(get_prevT(id_, S_dim)))  # other rows = previous time id (t-1)
+
+            # If it is the first step we read the zero state if not we read the inmediate last
+            prevstate_S2 = tf.cond(tf.less(zero, tf.mod(id_, S_dim)),
+                                  lambda: states_ta2_.read(get_prevS(id_)),  # get previous joint state id (j-1)
+                                  lambda: states_ta2_.read(T_dim * S_dim))  # first joint - get zero state !TODO: use the good joint
+            # Process cureent state and then the new state
+            current_state2 = prevstate_S2[0], prevstate_T2[0], prevstate_S2[1], prevstate_T2[1]
+            out2, state2 = cell2(out, current_state2)
+            outputs_ta2_ = outputs_ta2_.write(id_, out2)
+            states_ta2_ = states_ta2_.write(id_, state2)
 
             # Return outputs and incremented time step
-            return id_ + 1, outputs_ta_, states_ta_
+            return id_ + 1, outputs_ta_, states_ta_, outputs_ta2_, states_ta2_
+
+        # # Body of the while loop operation that applies the MD LSTM
+        # def body2(id_, outputs_ta2_, states_ta2_):
+        #     prevstate_T2 = tf.cond(tf.less_equal(id_, S_dim),
+        #                           lambda: states_ta2_.read(T_dim * S_dim),  # first row = zero state
+        #                           lambda: states_ta2_.read(get_prevT(id_, S_dim)))  # other rows = previous time id (t-1)
+        #
+        #     # If it is the first step we read the zero state if not we read the inmediate last
+        #     prevstate_S2 = tf.cond(tf.less(zero, tf.mod(id_, S_dim)),
+        #                           lambda: states_ta2_.read(get_prevS(id_)),  # get previous joint state id (j-1)
+        #                           lambda: states_ta2_.read(T_dim * S_dim))  # first joint - get zero state !TODO: use the good joint
+        #     # Process cureent state and then the new state
+        #     current_state2 = prevstate_S2[0], prevstate_T2[0], prevstate_S2[1], prevstate_T2[1]
+        #     out2, state2 = cell2(outputs_ta.read(id_), current_state2)
+        #     outputs_ta2_ = outputs_ta2_.write(id_, out2)
+        #     states_ta2_ = states_ta2_.write(id_, state2)
+        #
+        #     # Return outputs and incremented time step
+        #     return id_ + 1, outputs_ta_, states_ta_, outputs_ta2_, states_ta2_
 
         # Loop output condition. The index, given by the time, should be less than the
         # total number of steps defined within the image
-        def condition(id_, outputs_ta_, states_ta_):
+        def condition(id_, outputs_ta_, states_ta_, outputs_ta2_, states_ta2_):
             return tf.less(id_, T_dim * S_dim)
 
         # Run the looped operation
-        result, outputs_ta, states_ta = tf.while_loop(condition, body, [index, outputs_ta, states_ta],
+        result, _, _, outputs_ta2, states_ta2 = tf.while_loop(condition, body,
+                                                      [index, outputs_ta, states_ta, outputs_ta2, states_ta2],
                                                       parallel_iterations=1)
 
         # Extract the output tensors from the processesed tensor array
-        outputs = outputs_ta.stack()
-        states = states_ta.stack()
+        outputs = outputs_ta2.stack()
+        states = states_ta2.stack()
 
         # Reshape outputs to match the shape of the input
-        y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[0]])
+        # y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[0]])   # For outputs_ta
         # states = tf.reshape(states, [T_dim,S_dim,batch_size,2,lstm_size[0]])
+        y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[1]])
 
         # Reorder te dimensions to match the input
         y = tf.transpose(y, [2, 0, 1, 3])

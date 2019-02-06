@@ -190,9 +190,11 @@ def parse_data(joints_data, bodies_data):
         fr += 1
         b += nbb
         # b += 1
-    joints_list = np.zeros((len(joints_dict.keys()), fr, 25, 3))
-    for e,k in enumerate(joints_dict.keys()):
-        joints_list[e,:,:,:] = np.array(joints_dict[k]).resize(fr,25,3)
+    nk = list(joints_dict.keys())
+    joints_list = np.zeros((len(nk), fr, 25, 3))
+    for e,k in enumerate(nk):
+        # joints_list[e, :, :, :] = np.array(joints_dict[k])
+        joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,25,3))
     return joints_list
 
 # ------------------------
@@ -290,9 +292,15 @@ inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, 25, 3))  # (time, batch, 
 # outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
 
 
+# ------------------
 # Define the graph
+# ------------------
 # init_state, outputs, final_state, inp = build_lstm([16], inputs, None, BATCH_SIZE)
-outputs, states = stlstm_loop([16], inputs)
+outputs, states = stlstm_loop([16,16], inputs, do_norm=True) # do_norm=True
+# Classif
+# Loss
+
+# Trainer - Backward propagation
 
 
 # Add the variable initializer Op.
@@ -303,13 +311,16 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
+# Summary
+writer = tf.summary.FileWriter('./log2', sess.graph)
+with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
+    weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel_layer1"))
+    weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel_layer2"))
+
 
 # Run the session
 sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
-
-# coord = tf.train.Coordinator()
-# threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
 
 # TEST
@@ -324,7 +335,7 @@ sess.run(tfrecord_iterator.initializer)
 imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
 # Pre-process
 fname = fname.decode('UTF-8')
-# print(jts.shape)
+# print(jts[0])
 jts = parse_data(jts, bds)
 # bds = parse_body(bds)
 # jts = np.array(parse_joints(jts, tStates, bds))
@@ -348,7 +359,13 @@ print(jts.shape)    # shape = (frames,25,batch,3)
 # init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
 # print('\n\n',inps.shape,np.array(out).shape)
 out, sta = sess.run([outputs, states], feed_dict={inputs:jts})
-print(out.shape,sta.shape)
+# print(out.shape,sta.shape)
+
+
+# Write summary
+(wsummary, wsummary2) = sess.run([weights_summary, weights_summary2])
+writer.add_summary(wsummary,1)
+writer.add_summary(wsummary2,1)
 
 # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
 # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
@@ -357,8 +374,6 @@ print(out.shape,sta.shape)
 # video.release()
 
 
-# coord.request_stop()
-# coord.join(threads)
 
 # Close the session
 sess.close()
