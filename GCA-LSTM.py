@@ -2,7 +2,7 @@ import os
 import sys
 import scipy.io as sio
 import tensorflow as tf
-from ST_LSTM import STLSTMCell, stlstm_loop #, STLSTMStateTuple
+from ST_LSTM import stlstm_loop #STLSTMCell, STLSTMStateTuple
 import numpy as np
 import cv2
 
@@ -312,7 +312,7 @@ config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
 # Summary
-writer = tf.summary.FileWriter('./log2', sess.graph)
+# writer = tf.summary.FileWriter('./log2', sess.graph)
 with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
     weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel_layer1"))
     weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel_layer2"))
@@ -335,7 +335,7 @@ sess.run(tfrecord_iterator.initializer)
 imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
 # Pre-process
 fname = fname.decode('UTF-8')
-# print(jts[0])
+print(jts.shape)
 jts = parse_data(jts, bds)
 # bds = parse_body(bds)
 # jts = np.array(parse_joints(jts, tStates, bds))
@@ -359,13 +359,13 @@ print(jts.shape)    # shape = (frames,25,batch,3)
 # init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
 # print('\n\n',inps.shape,np.array(out).shape)
 out, sta = sess.run([outputs, states], feed_dict={inputs:jts})
-# print(out.shape,sta.shape)
+print(out.shape,sta.shape)
 
 
 # Write summary
-(wsummary, wsummary2) = sess.run([weights_summary, weights_summary2])
-writer.add_summary(wsummary,1)
-writer.add_summary(wsummary2,1)
+# (wsummary, wsummary2) = sess.run([weights_summary, weights_summary2])
+# writer.add_summary(wsummary,1)
+# writer.add_summary(wsummary2,1)
 
 # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
 # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
