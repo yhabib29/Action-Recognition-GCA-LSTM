@@ -15,6 +15,7 @@ from tensorflow.python.platform import tf_logging as logging
 
 _BIAS_VARIABLE_NAME = "bias"
 _WEIGHTS_VARIABLE_NAME = "kernel"
+JOINTS_ORDER = [1,2,3,2,4,5,6,5,4,2,7,8,9,8,7,2,1,10,11,12,13,12,11,10,14,15,16,15,14,10,1]
 
 
 def normalization(tens, scope=None):
@@ -135,7 +136,7 @@ class STLSTMCell(LayerRNNCell):
             raise ValueError("Expected inputs_shape to be known")
         else:
             if not self.built:
-                self.build(input_shape, name)
+                self.build(input_shape)
 
     @property
     def state_size(self):
@@ -145,12 +146,7 @@ class STLSTMCell(LayerRNNCell):
     def output_size(self):
         return self._output_size
 
-    def build(self, inputs_shape, name=None):
-        wname = _WEIGHTS_VARIABLE_NAME
-        bname = _BIAS_VARIABLE_NAME
-        if not name is None:
-            wname += "_" + name
-            bname += "_" + name
+    def build(self, inputs_shape):
         if inputs_shape[-1].value is None:
             raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
                              % str(inputs_shape))
@@ -159,14 +155,14 @@ class STLSTMCell(LayerRNNCell):
         h_depth = self._num_units
         wshape = [5 * self._num_units, input_depth + 2 * h_depth]
 
-        self._kernel = self.add_variable(wname,
+        self._kernel = self.add_variable(_WEIGHTS_VARIABLE_NAME,
             shape=wshape,
             initializer=self._initializer)
         if self.dtype is None:
             initializer = init_ops.zeros_initializer
         else:
             initializer = init_ops.zeros_initializer(dtype=self.dtype)
-        self._bias = self.add_variable(bname,
+        self._bias = self.add_variable(_BIAS_VARIABLE_NAME,
             shape=[5 * self._num_units],
             initializer=initializer)
         self.built = True
@@ -234,7 +230,7 @@ class GCACell():    #LayerRNNCell
     static_weights = False
 
     def initialize_static_weights(self):
-        with tf.variable_scope(type(self).__name__):
+        with tf.variable_scope(type(self).__name__, reuse=tf.AUTO_REUSE):
             # TODO: Hyperparameters hyperX to set
             # Initialize We1
             hyperX = (self.input_size + self.output_size) // 2
@@ -318,7 +314,7 @@ class GCACell():    #LayerRNNCell
 
 
 
-def stlstm_loop(lstm_size, input_data, iters=1, do_norm=False):
+def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
     """https://github.com/philipperemy/tensorflow-multi-dimensional-lstm/blob/master/md_lstm.py
     Implements multi dimension LSTM
     @param lstm_size: the hidden units
@@ -327,7 +323,7 @@ def stlstm_loop(lstm_size, input_data, iters=1, do_norm=False):
     returns (y,states) - y=[batch,frames,joints,lstm_size[1]] the output of the lstm
     """
 
-    with tf.variable_scope("ST-LSTM"):
+    with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
         # Create multidimensional cell with selected size
         cell = STLSTMCell(lstm_size[0],
                           input_shape=input_data.get_shape(),
@@ -367,20 +363,6 @@ def stlstm_loop(lstm_size, input_data, iters=1, do_norm=False):
         inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array', dynamic_size=True,
                                    infer_shape=False)
         inputs_ta = inputs_ta.unstack(x)
-        # states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array_1', clear_after_read=False)
-        # outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array_1', clear_after_read=False)
-        # states_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array2', clear_after_read=False)
-        # outputs_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array2')
-        #
-        # # initial cell hidden states: last position of the array = LSTMStateTuple filled with zeros
-        # states_ta = states_ta.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
-        #                                               tf.zeros([batch_size, lstm_size[0]], tf.float32)))
-        # states_ta2 = states_ta2.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[1]], tf.float32),
-        #                                                           tf.zeros([batch_size, lstm_size[1]], tf.float32)))
-        #
-        # # Informativeness tensors
-        # e_ta = [tf.TensorArray(tf.float32, T_dim*S_dim, name='e_it{}'.format(ite), clear_after_read=False)
-        #         for ite in range(1,iters+1)]
 
         # Function to get the previous joints id (cs_prev,hs_prev)
         def get_prevS(t_, w_=1):
@@ -463,66 +445,73 @@ def stlstm_loop(lstm_size, input_data, iters=1, do_norm=False):
 
 
         # Init loop vars
-        it = 1  # tf.constant(1)
-        # for it in range(1, iters):
-        states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array_1', clear_after_read=False)
-        outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array_1', clear_after_read=False)
-        states_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array2', clear_after_read=False)
-        outputs_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array2')
+        # it = 1  # tf.constant(1)
+        for it in range(1, iters+1):
+            states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array_1', clear_after_read=False)
+            outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array_1', clear_after_read=False)
+            states_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim + 1, name='state_array2', clear_after_read=False)
+            outputs_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='output_array2')
 
-        # initial cell hidden states: last position of the array = LSTMStateTuple filled with zeros
-        states_ta = states_ta.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
-                                                      tf.zeros([batch_size, lstm_size[0]], tf.float32)))
-        states_ta2 = states_ta2.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[1]], tf.float32),
-                                                                  tf.zeros([batch_size, lstm_size[1]], tf.float32)))
+            # initial cell hidden states: last position of the array = LSTMStateTuple filled with zeros
+            states_ta = states_ta.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
+                                                          tf.zeros([batch_size, lstm_size[0]], tf.float32)))
+            states_ta2 = states_ta2.write(T_dim * S_dim, LSTMStateTuple(tf.zeros([batch_size, lstm_size[1]], tf.float32),
+                                                                      tf.zeros([batch_size, lstm_size[1]], tf.float32)))
 
-        # Informativeness tensors
-        e_ta = [tf.TensorArray(tf.float32, T_dim*S_dim, name='e_it{}'.format(ite), clear_after_read=False)
-                for ite in range(1,iters+1)]
-        index = tf.constant(0)
+            # Informativeness tensors
+            e_ta = tf.TensorArray(tf.float32, T_dim*S_dim, name='e_it{}'.format(it), clear_after_read=False)
+            index = tf.constant(0)
 
-        # Loop 1: First ST-LSTM layer
-        _, outputs_ta, states_ta = tf.while_loop(condition, body1, [index, outputs_ta, states_ta],
-                                                 parallel_iterations=1)
+            # Loop 1: First ST-LSTM layer
+            _, outputs_ta, states_ta = tf.while_loop(condition, body1, [index, outputs_ta, states_ta],
+                                                     parallel_iterations=1)
 
-        # Initialize context 0
-        if it == 1:
-            gca_cells[0].set_prevcontext(init_context(outputs_ta))
+            # Initialize context 0
+            if it == 1:
+                gca_cells[0].set_prevcontext(init_context(outputs_ta))
 
-        # Process e
-        index = tf.constant(0)
-        _, _, _, e_ta[it-1] = tf.while_loop(condition2, process_information, [index, outputs_ta, states_ta2, e_ta[it-1]],
-                                       parallel_iterations=1)
-        e_sum = tf.reduce_sum(e_ta[it-1].stack(), axis=0)
+            # Process e
+            index = tf.constant(0)
+            _, _, _, e_ta = tf.while_loop(condition2, process_information, [index, outputs_ta, states_ta2, e_ta],
+                                           parallel_iterations=1)
+            e_sum = tf.reduce_sum(e_ta.stack(), axis=0)
 
-        # Loop 2: Second ST-LSTM layer
-        index = tf.constant(0)
-        _, outputs_ta2, states_ta2, _ = tf.while_loop(condition2, body2,
-                                                        [index, outputs_ta2, states_ta2, e_ta[it-1]],
-                                                        parallel_iterations=1)
+            # Loop 2: Second ST-LSTM layer
+            index = tf.constant(0)
+            _, outputs_ta2, states_ta2, _ = tf.while_loop(condition2, body2,
+                                                            [index, outputs_ta2, states_ta2, e_ta],
+                                                            parallel_iterations=1)
 
-        # Update context
-        ctx = gca_cells[it-1].update_context(outputs_ta2.read(S_dim*T_dim-1))
-        it += 1
-        if it < iters:
-            gca_cells[it-1].prevcontext = ctx
+            # Update context
+            ctx = gca_cells[it-1].update_context(outputs_ta2.read(S_dim*T_dim-1))
+            # it += 1
+            if it + 1 < iters:
+                gca_cells[it].prevcontext = ctx
 
         # Softmax from context
+        Wc = tf.get_variable("Wc", [nb_classes, lstm_size[0]], tf.float32,
+                             tf.truncated_normal_initializer(), trainable=True)
+        y = math_ops.mat_mul(Wc, gca_cells[-1].context,transpose_b=True)
+        y = tf.nn.softmax(tf.transpose(y))
 
         # Extract the output tensors from the processesed tensor array
-        outputs = outputs_ta2.stack()
-        states = states_ta2.stack()
+        # outputs = outputs_ta2.stack()
+        # states = states_ta2.stack()
 
         # Reshape outputs to match the shape of the input
         # y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[0]])   # For outputs_ta
         # states = tf.reshape(states, [T_dim,S_dim,batch_size,2,lstm_size[0]])
-        y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[1]])
+        # y = tf.reshape(outputs, [T_dim, S_dim, batch_size, lstm_size[1]])
 
         # Reorder te dimensions to match the input
-        y = tf.transpose(y, [2, 0, 1, 3])
-        #         # Reverse if selected
-        #         if dims is not None:
-        #             y = tf.reverse(y, dims)
-        #
+        # y = tf.transpose(y, [2, 0, 1, 3])
+
         # Return the output and the inner states
-        return y, states
+        return y
+
+
+def stlstm_loss(prediction, ground_truth, nb_classes):
+    label = tf.one_hot(ground_truth, nb_classes)
+    label = tf.reshape(label, [-1, nb_classes])
+    loss = tf.losses.log_loss(label,prediction)
+    return loss

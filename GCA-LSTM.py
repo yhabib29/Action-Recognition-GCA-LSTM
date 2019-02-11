@@ -2,7 +2,7 @@ import os
 import sys
 import scipy.io as sio
 import tensorflow as tf
-from ST_LSTM import stlstm_loop #STLSTMCell, STLSTMStateTuple
+from ST_LSTM import stlstm_loop, stlstm_loss #STLSTMCell, STLSTMStateTuple
 import numpy as np
 import cv2
 
@@ -16,6 +16,13 @@ import cv2
 # HEIGHT = 480
 CHANNELS = 3
 BATCH_SIZE = 1
+# TODO: Set number of classes
+NB_CLASSES = 10
+LEARNING_RATE = 0.0015
+ITERS = 10   # 10000
+NUM_UNITS = [128,128]
+JOINTS = 16
+GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 
 
 # ------------------------
@@ -155,6 +162,37 @@ def parse_joints(joints_data, tstates_data, bodies_data):
     return joints_list
 
 
+def convertJoints(joints):
+    new_joints = [0] * JOINTS
+    zero3D = [0.,0.,0.]
+    for j in range(JOINTS):
+        joint = joints[GCA_KINECT[j]]
+        if joint != zero3D:
+            new_joints[j] = joint
+            continue
+        else:
+            if j == 2:
+                joint = joints[2]
+            elif j == 12:
+                joint = joints[19]
+            elif j == 15:
+                joint = joints[15]
+            elif j == 5:
+                for jj in [11,24,23]:
+                    joint = joints[jj]
+                    if joint != zero3D:
+                        break
+            elif j == 8:
+                for jj in [7,22,21]:
+                    joint = joints[jj]
+                    if joint != zero3D:
+                        break
+            new_joints[j] = joints
+    return joints
+
+
+
+
 def parse_data(joints_data, bodies_data):
     """
 
@@ -184,6 +222,7 @@ def parse_data(joints_data, bodies_data):
                     joints_dict[nb] += (fr-len(joints_dict[nb])) * [[0,0,0]]
                 # jt = [joints_data[b + nbb][3 * jo:3 * jo + 3].tolist() for jo in range(25)]
                 jt = joints_data[fr][nbb*25:(nbb+1)*25].tolist()
+                jt = convertJoints(jt)
                 joints_dict[nb].append(jt)
                 # bd.append(b)
                 nbb += 1
@@ -191,10 +230,10 @@ def parse_data(joints_data, bodies_data):
         b += nbb
         # b += 1
     nk = list(joints_dict.keys())
-    joints_list = np.zeros((len(nk), fr, 25, 3))
+    joints_list = np.zeros((len(nk), fr, JOINTS, 3))
     for e,k in enumerate(nk):
         # joints_list[e, :, :, :] = np.array(joints_dict[k])
-        joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,25,3))
+        joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,JOINTS,3))
     return joints_list
 
 # ------------------------
@@ -229,51 +268,34 @@ def build_lstm(lstm_sizes, inputs, keep_prob_, batch_size):
     return initial_state, lstm_outputs, final_state, inputs
 
 
-"""
-DATADIR = "/home/amusaal/DATA/Cornell/"
-dataset_name = 'office'
-path = DATADIR + dataset_name + '/'
 
-# BODY
-body_mat = sio.loadmat(DATADIR + 'tools/data_sample/body.mat')
-nb_frames, nb_body = body_mat['body'].shape
-
-oclasses_mat = sio.loadmat(DATADIR + 'office_classname.mat')
-office_classes = []
-for oc in oclasses_mat['office_classname'][0]:
-    if oc.shape[0] != 1:
-        office_classes.append(None)
-    elif len(oc[0]) < 1:
-        office_classes.append(None)
-    else:
-        office_classes.append(oc[0])
-print(office_classes)
-# print(len(oclasses_mat['office_classname'][0][2][0]))
-
-kclasses_mat = sio.loadmat(DATADIR + 'kitchen_classname.mat')
-kitchen_classes = []
-for kc in kclasses_mat['kitchen_classname'][0]:
-    if kc.shape[0] != 1:
-        kitchen_classes.append(None)
-    elif len(kc[0]) < 1:
-        kitchen_classes.append(None)
-    else:
-        kitchen_classes.append(kc[0])
-print(kitchen_classes)
-# print(kclasses_mat['kitchen_classname'])
-"""
 
 
 # TFRecords dataset paths
-train_dataset = "../DATA/Cornell/office_train_cornell.tfrecords"
-valid_dataset = "../DATA/Cornell/office_test_cornell.tfrecords"
+dataset_name = "office"
+train_dataset = "../DATA/Cornell/{}_train_cornell.tfrecords".format(dataset_name)
+valid_dataset = "../DATA/Cornell/{}_test_cornell.tfrecords".format(dataset_name)
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
-# image, label, bboxes, nb_objects = read_and_decode(filename_queue)
+if "office" in dataset_name:
+    NB_CLASSES = 10
+    class_ids = [0,1,9,17,18,19,22,37,41,42]
+    classnames = ['reading','walking','leave-office','fetch-book','put-back-book',
+                  'put-down-item','take-item','play-computer','turn-on-monitor',
+                  'turn-off-monitor']
+elif "kitchen" in dataset_name:
+    NB_CLASSES = 11
+    class_ids = [0,1,2,4,6,7,8,9,10,13,15]
+    classnames = ['fetch-from-fridge','put-back-to-fridge','prepare-food','microwaving',
+                  'fetch-from-oven','pouring','drinking','leave-kitchen','fill-kettle',
+                  'plug-in-kettle','move-kettle']
+else:
+    error("Use office or kitchen datasets only !")
+
 
 tfrecord_dataset = tf.data.TFRecordDataset(train_dataset)
-tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=10000)
+tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=1000)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
-# tfrecord_dataset = tfrecord_dataset.repeat()
+tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
 # pad_shapes = (tf.TensorShape([None, None, CHANNELS]),
 #               tf.TensorShape([None, 25, 3]),
@@ -288,7 +310,9 @@ next_element = tfrecord_iterator.get_next()
 
 # Define variables
 # inputs = tf.placeholder(tf.float32, (None, None, 3))  # (time, batch, features, channels) - (time,batch,in)
-inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, 25, 3))  # (time, batch, features, channels) - (time,batch,in)
+inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, batch, features, channels) - (time,batch,in)
+loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
+ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="ground_truth_placeholder")
 # outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
 
 
@@ -296,11 +320,13 @@ inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, 25, 3))  # (time, batch, 
 # Define the graph
 # ------------------
 # init_state, outputs, final_state, inp = build_lstm([16], inputs, None, BATCH_SIZE)
-outputs, states = stlstm_loop([16,16], inputs, do_norm=True) # do_norm=True
-# Classif
+outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True) # do_norm=True
 # Loss
+loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
 
 # Trainer - Backward propagation
+train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
+
 
 
 # Add the variable initializer Op.
@@ -312,10 +338,11 @@ config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
 # Summary
-# writer = tf.summary.FileWriter('./log2', sess.graph)
-with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
-    weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel_layer1"))
-    weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel_layer2"))
+# summary = tf.summary.scalar(name='Loss', tensor=loss)
+writer = tf.summary.FileWriter('./log2', sess.graph)
+# with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
+#     weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel"))
+#     weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel"))
 
 
 # Run the session
@@ -323,43 +350,79 @@ sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
 
 
-# TEST
-# imgs, jts, aclasses, bds, tstates = sess.run(next_element)
-# print('Images:\t\t',imgs.shape)
-# print('Joints:\t\t',jts.shape)
-# print('Classes:\t',aclasses.shape)
-# print('Bodies:\t\t',bds.shape)
-# print('TStates:\t',tstates.shape)
+for i in range(1,ITERS+1):
 
-# Load scene
-imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
-# Pre-process
-fname = fname.decode('UTF-8')
-print(jts.shape)
-jts = parse_data(jts, bds)
-# bds = parse_body(bds)
-# jts = np.array(parse_joints(jts, tStates, bds))
-print(imgs.shape)
-print(h,w,nbf)
-print(fname)
-print(jts.shape)
-# print(jts_dict[list(jts_dict.keys())[0]].shape)
-# print('tStates',tStates.shape, tStates)
-# print('Bodies', np.array(bds).shape, bds)
-# print('Classes', ac.shape, ac)
-# print('Joints', jts.shape, jts)
+    # TEST
+    # imgs, jts, aclasses, bds, tstates = sess.run(next_element)
+    # print('Images:\t\t',imgs.shape)
+    # print('Joints:\t\t',jts.shape)
+    # print('Classes:\t',aclasses.shape)
+    # print('Bodies:\t\t',bds.shape)
+    # print('TStates:\t',tstates.shape)
 
-# For now use only one body
-jts = jts[0]
-if len(jts.shape) == 3:
-    jts = jts.reshape((1,) + jts.shape)
-    # jts = np.swapaxes(jts,0,1)
-    # jts = np.swapaxes(jts, 1, 2)
-print(jts.shape)    # shape = (frames,25,batch,3)
-# init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
-# print('\n\n',inps.shape,np.array(out).shape)
-out, sta = sess.run([outputs, states], feed_dict={inputs:jts})
-print(out.shape,sta.shape)
+    # Load scene
+    imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+    # Pre-process
+    fname = fname.decode('UTF-8')
+    ac = np.array(ac) - 1
+    try:
+        jts = parse_data(jts, bds)
+    except ValueError:
+        warning("Issue while parsing {}".format(fname))
+        continue
+    # bds = parse_body(bds)
+    # jts = np.array(parse_joints(jts, tStates, bds))
+    # print(imgs.shape)
+    # print(h,w,nbf)
+    # print(fname)
+    # print(jts.shape)
+    # print(jts_dict[list(jts_dict.keys())[0]].shape)
+    # print('tStates',tStates.shape, tStates)
+    # print('Bodies', np.array(bds).shape, bds)
+    # print('Classes', ac.shape, ac)
+    # print('Joints', jts.shape, jts)
+
+    print("Iter {}: {} [{},{}] - {}".format(i,fname,w,h,jts.shape))
+
+    # For now use only one body
+    jts = jts[0]
+    if len(jts.shape) == 3:
+        jts = jts.reshape((1,) + jts.shape)
+        # jts = np.swapaxes(jts,0,1)
+        # jts = np.swapaxes(jts, 1, 2)
+    # print(jts.shape)    # shape = (frames,25,batch,3)
+    # init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
+    # print('\n\n',inps.shape,np.array(out).shape)
+    # out = sess.run(outputs, feed_dict={inputs:jts})
+
+    start, end = 0, 1
+    losses = []
+    avg_loss = 0.0
+    for k in range(1,len(ac)):
+        end = k
+        if k+1 == len(ac):
+            end = k+1
+        elif ac[k] == ac[k-1]:
+            continue
+        if ac[k] == -1:
+            start = k
+            continue
+        indata = jts[:,start:end,:,:]
+        gt = np.reshape(class_ids.index(int(ac[k])), (1,1))
+        # out = sess.run(outputs, feed_dict={inputs: indata})
+        # print(out)
+        y, lo, _ = sess.run([outputs, loss, train_step],
+                               feed_dict={inputs: indata, ground_truth: gt})
+        losses.append(lo)
+        print("Predicted = {} / Truth = {}".format(y, ac[k]))
+        start = k
+
+    avg_loss = np.array(losses).mean()
+    print("AVG Loss = {}\n\n".format(avg_loss))
+    if i%50 == 0:
+        summary_str = tf.summary.scalar(name='AVG Loss', tensor=avg_loss)
+        writer.add_summary(summary_str, global_step=i)
+
 
 
 # Write summary
@@ -373,7 +436,13 @@ print(out.shape,sta.shape)
 #     video.write(im)
 # video.release()
 
-
+# Print Trainable variables
+# variables_names = [v.name for v in tf.trainable_variables()]
+# values = sess.run(variables_names)
+# for k, v in zip(variables_names, values):
+#     print("Variable: ", k)
+#     print("Shape: ", v.shape)
+#     print(v)
 
 # Close the session
 sess.close()
