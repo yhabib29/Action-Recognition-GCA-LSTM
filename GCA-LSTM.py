@@ -4,6 +4,8 @@ import scipy.io as sio
 import tensorflow as tf
 from ST_LSTM import stlstm_loop, stlstm_loss #STLSTMCell, STLSTMStateTuple
 import numpy as np
+from shutil import copy2
+from datetime import datetime
 import cv2
 
 
@@ -16,10 +18,9 @@ import cv2
 # HEIGHT = 480
 CHANNELS = 3
 BATCH_SIZE = 1
-# TODO: Set number of classes
-NB_CLASSES = 10
+# NB_CLASSES = 10
 LEARNING_RATE = 0.0015
-ITERS = 10   # 10000
+ITERS = 10000   # 10000
 NUM_UNITS = [128,128]
 JOINTS = 16
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
@@ -312,6 +313,7 @@ next_element = tfrecord_iterator.get_next()
 # inputs = tf.placeholder(tf.float32, (None, None, 3))  # (time, batch, features, channels) - (time,batch,in)
 inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, batch, features, channels) - (time,batch,in)
 loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
+pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
 ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="ground_truth_placeholder")
 # outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
 
@@ -322,11 +324,16 @@ ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="groun
 # init_state, outputs, final_state, inp = build_lstm([16], inputs, None, BATCH_SIZE)
 outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True) # do_norm=True
 # Loss
-loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
+# loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
+loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]   # From last to first
 
 # Trainer - Backward propagation
-train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
-
+# opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
+# update_ops = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+# with tf.control_dependencies(update_ops):
+# train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
+train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
+               for lo in loss_list]
 
 
 # Add the variable initializer Op.
@@ -338,19 +345,31 @@ config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
 # Summary
-# summary = tf.summary.scalar(name='Loss', tensor=loss)
+varnames = ["ST-LSTM/layer1/kernel", "ST-LSTM/layer2/kernel", "ST-LSTM/GCACell/We1",
+            "ST-LSTM/GCACell/We2","ST-LSTM/kernel_F1", "ST-LSTM/kernel_F2", "ST-LSTM/Wc"]
+sm_loss = tf.summary.scalar(name='AVG Loss', tensor=tf.reduce_mean(loss_list))
+sm_accuracy = tf.summary.scalar(name='Accuracy', tensor=pl_accuracy)
 writer = tf.summary.FileWriter('./log2', sess.graph)
-# with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
-#     weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel"))
-#     weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel"))
+with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
+    # weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel"))
+    # weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel"))
+    weights_summaries = [tf.summary.histogram(vname, tf.get_variable(vname[8:])) for vname in varnames]
 
+# Save / Restore weights
+log_file = 'log_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
+weights_file = "gca_lstm"
+saver = tf.train.Saver(max_to_keep=4)
+# if os.path.isfile('./gca_lstm.ckpt.index'):
+#     saver.restore(sess, tf.train.latest_checkpoint('./gca_lstm.ckpt'))
 
 # Run the session
 sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
 
-
+total_accuracy = 0.0
+total_count = 0
 for i in range(1,ITERS+1):
+    log = ''
 
     # TEST
     # imgs, jts, aclasses, bds, tstates = sess.run(next_element)
@@ -398,6 +417,8 @@ for i in range(1,ITERS+1):
     start, end = 0, 1
     losses = []
     avg_loss = 0.0
+    accuracy, count = 0.0, 0
+    # Select all frames sequences label per label
     for k in range(1,len(ac)):
         end = k
         if k+1 == len(ac):
@@ -411,17 +432,41 @@ for i in range(1,ITERS+1):
         gt = np.reshape(class_ids.index(int(ac[k])), (1,1))
         # out = sess.run(outputs, feed_dict={inputs: indata})
         # print(out)
-        y, lo, _ = sess.run([outputs, loss, train_step],
+        results, lo, _, sm_lo, sm_weights = sess.run([outputs, loss_list, train_steps, sm_loss, weights_summaries],
                                feed_dict={inputs: indata, ground_truth: gt})
-        losses.append(lo)
-        print("Predicted = {} / Truth = {}".format(y, ac[k]))
+        losses.append(lo[0])
+        predicted_class = classnames[results[-1].argmax()]
+        gtruth_class = classnames[class_ids.index(ac[k])]
+        # Print predictions and save to log
+        # print("Predicted = {} / Truth = {}  \tScores={}".format(class_ids[results[-1].argmax()], ac[k], results[-1]))
+        # print("Predicted = {} / Truth = {}  \tScores={}".format(predicted_class,gtruth_class, results[-1]))
+        line = "[{}] Predicted = {} / Truth = {}  \tScores={}".format(end-start, results[-1].argmax(),
+                                                                     class_ids.index(ac[k]), results[-1].tolist())
+        print(line)
+        log += line + '\n'
         start = k
+        # Accuracy
+        count += 1
+        if results[-1].argmax() == class_ids.index(ac[k]):
+            accuracy += 1
 
+    total_accuracy += accuracy
+    total_count += count
+    accuracy = accuracy / count
     avg_loss = np.array(losses).mean()
-    print("AVG Loss = {}\n\n".format(avg_loss))
-    if i%50 == 0:
-        summary_str = tf.summary.scalar(name='AVG Loss', tensor=avg_loss)
-        writer.add_summary(summary_str, global_step=i)
+    # Print Loss and Accuracy and save to log
+    line = "AVG Loss = {}\nAccuracy = {}\n".format(avg_loss, accuracy)
+    print(line)
+    with open(log_file, 'a') as flog:
+        flog.write(log + line + '\n')
+    if i%10 == 0:
+        sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
+        writer.add_summary(sm_acc, global_step=i)
+        writer.add_summary(sm_lo, global_step=i)
+        for sm_w in sm_weights:
+            writer.add_summary(sm_w, global_step=i)
+    if i%1000 == 0:
+        saver.save(sess, "./{}".format(weights_file), global_step=i)
 
 
 
@@ -446,3 +491,17 @@ for i in range(1,ITERS+1):
 
 # Close the session
 sess.close()
+
+# Copy weights
+nbt = 1
+for dir in os.listdir('weights'):
+    if not os.path.isdir('weights/{}'.format(dir)):
+        continue
+    if 'Train_' in dir:
+        dir += 1
+os.makedirs('weights/Train_{:03d}'.format(nbt))
+for fi in os.listdir('.'):
+    if os.path.isfile(fi) and weights_file in fi:
+        copy2(fi, 'weights/Train_{:03d}/'.format(nbt))
+
+print('Done')
