@@ -503,5 +503,6 @@ os.makedirs('weights/Train_{:03d}'.format(nbt))
 for fi in os.listdir('.'):
     if os.path.isfile(fi) and weights_file in fi:
         copy2(fi, 'weights/Train_{:03d}/'.format(nbt))
+copy2('checkpoint', 'weights/Train_{:03d}/'.format(nbt))
 
 print('Done')
