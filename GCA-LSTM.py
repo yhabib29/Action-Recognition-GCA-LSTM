@@ -2,6 +2,7 @@ import os
 import sys
 import scipy.io as sio
 import tensorflow as tf
+import tensorboard.plugins.pr_curve.summary as summary_prcurve
 from ST_LSTM import stlstm_loop, stlstm_loss #STLSTMCell, STLSTMStateTuple
 import numpy as np
 from shutil import copy2
@@ -31,6 +32,14 @@ GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 # ------------------------
 
 
+def isfloat(value):
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
 def sigmoid(x, derivative=False):
     sigm = 1. / (1. + np.exp(-x))
     if derivative:
@@ -51,6 +60,163 @@ def error(msg):
     return
 
 
+def get_help():
+    gbold = '\033[1;32m'
+    green = '\033[0;32m'
+    dpath = '../DATA/Cornell/office_train.tfrecords'
+    cpath = '../DATA/Cornell/office.class'
+    mhelp =  gbold + "--help [-h]\t\t\t" + green
+    mhelp += "Show help\n"
+    mhelp += gbold + "--mode [-m]\tMODE\t\t" + green
+    mhelp += "Choose between Training ('train') and Test ('test') mode\n"
+    mhelp += gbold + "--dataset [-d]\tPATH\t\t" + green
+    mhelp += "Path to the TFRecords dataset or use 'office'/'kitchen' for Cornell dataset\n"
+    mhelp += gbold + "--class [-c]\tPATH\t\t" + green
+    mhelp += "Path to the class file containing class IDs and Class names where each line is: ID CLASS_NAME\n"
+    mhelp += gbold + "--dim [-n]\tDIM_LIST\t" + green
+    mhelp += "LSTM layers dimension list (default: '128,128')\n"
+    mhelp += gbold + "--lr [-l]\tLEARNING_RATE\t" + green
+    mhelp += "Learning Rate\n"
+    mhelp += gbold + "--iter [-i]\tITERATIONS\t" + green
+    mhelp += "Number of training iterations\n\n"
+    mhelp += gbold + "Example:\n" + green
+    mhelp += "python3 GCA-LSTM.py -m train -l 0.0015 -i 10000 -n 128,128 -d {} -c {}\n\n".format(dpath, cpath)
+    mhelp += '\033[0m'
+    return mhelp
+
+
+def read_dims(dims):
+    num_units_ = []
+    lim = len(dims)
+    start_ = 0
+    for i,ch in enumerate(dims):
+        if ch == ',' or i == lim-1:
+            dimension = dims[start_: i] if i < lim-1 else dims[start_:]
+            if dimension.isdigit():
+                num_units_.append(int(dimension))
+                start_ = i+1
+                continue
+        elif ch.isdigit():
+            continue
+        error('Error: Invalid character in {}\nIt should be for example: 128,128'.format(dims))
+    return num_units_
+
+
+def read_class(class_file_):
+    """
+    Parse class file where each line is
+    ID CLASS_NAME
+    :param class_file:                      Path to the class file
+    :return: nb_classes, cids, cnames       Number of classes, Class IDs, Class names
+    """
+    cids = []
+    cnames = []
+    nb_classes = 0
+    with open(class_file_, 'r') as f:
+        for l in f.readlines():
+            lim = l.index(' ')
+            cid = l[:lim]
+            cname = l[lim + 1:-1]
+            if not cid.isdigit():
+                error('Invalid Class Index {} in {}'.format(cid, class_file_))
+            if len(cname) < 1:
+                error('Invalid class name {} in {}'.format(cname, class_file_))
+            cids.append(int(cid))
+            cnames.append(cname)
+            nb_classes += 1
+    return nb_classes, cids, cnames
+
+
+def parse_args():
+    global mode, ITERS, dataset, dataset_name, NB_CLASSES, class_ids, classnames, NUM_UNITS, LEARNING_RATE
+    help_ = get_help()
+    argv = sys.argv
+    argc = len(argv)
+    for a,arg in enumerate(argv):
+        if a == argc-1:
+            if arg in ['--help', '-h']:
+                print(help_)
+                sys.exit()
+            break
+        # Help
+        elif arg in ['--help', '-h']:
+            print(help_)
+            sys.exit()
+        # - train/test
+        elif arg in ['--mode', '-m']:
+            if argv[a+1] in ['train', 'test']:
+                mode = argv[a+1]
+            else:
+                error('Error: Invalid mode {}'.format(argv[a+1]))
+        # - Iterations
+        elif arg in ['--iter', '-i']:
+            if argv[a+1].isdigit():
+                ITERS = argv[a+1]
+            else:
+                error('Error: Invalid number of iterations')
+        # - Dataset
+        elif arg in ['--dataset', '-d']:
+            path = argv[a+1]
+            if path in ['office', 'kitchen']:
+                dataset_name = path
+            elif os.path.isfile(path):
+                dataset = path
+            else:
+                error('Error: Could not find dataset file at {}'.format(path))
+        # Class info
+        elif arg in ['--class', '-c']:
+            if os.path.isfile(argv[a+1]):
+                [NB_CLASSES, class_ids, classnames] = read_class(argv[a+1])
+            else:
+                error('Error: Could not find class file {}'.format(argv[a+1]))
+        # - Learning Rate
+        elif arg in ['--lr', '-l']:
+            if isfloat(argv[a+1]):
+                LEARNING_RATE = argv[a+1]
+            else:
+                error('Error: Invalid value for learning rate, it must be a float not {}'.format(argv[a+1]))
+        # - LSTM dims
+        elif arg in ['--dim', '-n']:
+            NUM_UNITS = read_dims(argv[a+1])
+        else:
+            continue
+
+    # Confirm Dataset path
+    if not dataset:
+        mode_ = 'test' if mode == 'valid' else mode
+        dataset = "../DATA/Cornell/{}_{}.tfrecords".format(dataset_name, mode_)
+        if None in [NB_CLASSES, class_ids, classnames]:
+            class_file = "../DATA/Cornell/{}.class".format(dataset_name)
+            [NB_CLASSES, class_ids, classnames] = read_class(class_file)
+    if not os.path.isfile(dataset):
+        warning('Could not find dataset at {}'.format(dataset))
+        dataset = input('Enter dataset file path : ')
+        if not os.path.isfile(dataset):
+            error('Error: Could not find dataset at {}'.format(dataset))
+
+    return
+
+
+def update_stats(stats_, label_, predictions_):
+    positive_class = predictions_.argmax()
+    for n in range(len(stats)):
+        if n == positive_class:
+            # True Positive
+            if n == label_:
+                stats_[n][0] += 1
+            # False Positive
+            else:
+                stats_[n][2] += 1
+        else:
+            # True Negative
+            if n != label_:
+                stats_[n][1] += 1
+            # False Negative
+            else:
+                stats_[n][3] += 1
+    return stats_
+
+
 # ------------------------
 #          DATA
 # ------------------------
@@ -68,7 +234,7 @@ def _parse_(serialized_example):
                'bodies': tf.FixedLenSequenceFeature([], dtype=tf.int64),
                'joints': tf.VarLenFeature(dtype=tf.float32),
                'trackingStates': tf.VarLenFeature(dtype=tf.int64)
-               }
+    }
     ctx,features = tf.parse_single_sequence_example(serialized_example,context,feature)
     images = tf.map_fn(tf.image.decode_jpeg, features['images'], dtype=tf.uint8)
     images = tf.map_fn(lambda x: tf.reverse(x, axis=[-1]), images, dtype=tf.uint8)
@@ -86,81 +252,9 @@ def _parse_(serialized_example):
     joints = tf.sparse.to_dense(features['joints'])
     trackingStates = tf.sparse.to_dense(features['trackingStates'])
     joints = tf.reshape(joints, [nb_frames,25,3])
-    # is_object = tf.cast(nb_bodies, tf.bool)
-
-    # image_shape = tf.stack([height, width, CHANNELS])
-    # nb_bodies = tf.shape(bodies)
-    # print(nb_bodies)
-    # joints_shape = tf.stack([nb_bodies, 25, 3])
-    # label_shape = tf.stack([nb_objects])  # ,1)
-
-    # image = tf.reshape(image, [height, width, 3])
-    # joints = tf.cond(tf.reshape(joints, joints_shape))
-    # labels = tf.cond(is_object,
-    #                  lambda: tf.reshape(labels, label_shape),
-    #                  lambda: tf.constant(-1, dtype=tf.int64))
-
-    # d_map, gt_map = yolo_ground_truth(bboxes)
-    # image = tf.image.resize_image_with_crop_or_pad(image=image,
-    #                                                target_height=HEIGHT,
-    #                                                target_width=WIDTH)
-    # image = tf.reshape(image, [BATCH_SIZE, HEIGHT, WIDTH, CHANNELS])
 
     # return (image, joints, aclass, bodies, trackingStates)
     return (images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, framename)
-
-
-def parse_labels(classes, scene_joints, scene_trackingStates, scene_bodies, nframe):
-    labels = []
-    for n in range(nframe):
-        label = []
-        nbody = len(scene_bodies[n]) if scene_bodies[n][0] == -1 else 0
-
-        label.append(classes[n])
-    return labels
-
-
-def parse_body(bodies_data):
-    """
-
-    :param bodies_data: List of bodies index in each frame (-1 if nobody)
-    :return:            List of bodies id in each frame reshaped
-    """
-    body_list = []
-    for b in range(len(bodies_data)):
-        if bodies_data[b] == -1:
-            body_list.append([-1])
-        bd = []
-        nbb = 0
-        for nb in range(6):
-            if b + nbb >= len(bodies_data):
-                continue
-            if bodies_data[b + nbb] == nb:
-                bd.append(nb)
-                nbb += 1
-        body_list.append(bd)
-    return body_list
-
-
-def parse_joints(joints_data, tstates_data, bodies_data):
-    joints_list = []
-    tstates_list = []
-    j = 0
-    while j < len(joints_data):
-        frame_bodies = bodies_data[j]
-        if frame_bodies == [-1]:
-            joints_list.append([])
-            j += 1
-            continue
-        nbody = len(frame_bodies)
-        ts = []
-        for b in range(nbody):
-            jt = [joints_data[j][3*jo:3*jo+3] for jo in range(25)]
-            ts.append(tstates_data[j])
-            joints_list.append(jt)
-            j += 1
-        tstates_list.append(ts)
-    return joints_list
 
 
 def convertJoints(joints):
@@ -192,11 +286,9 @@ def convertJoints(joints):
     return joints
 
 
-
-
 def parse_data(joints_data, bodies_data):
     """
-
+    Parse raw data loaded from TFRecord and extract structured joints lists
     :param joints_data:
     :param bodies_data:
     :return: joints_list    np.array of shape (body,frame,joint,3)
@@ -237,66 +329,63 @@ def parse_data(joints_data, bodies_data):
         joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,JOINTS,3))
     return joints_list
 
+
 # ------------------------
 #          NETWORK
 # ------------------------
 
 
-def build_lstm(lstm_sizes, inputs, keep_prob_, batch_size):
-    """
-    Create the LSTM layers
-    """
-    # lstms = [tf.contrib.rnn.BasicLSTMCell(size) for size in lstm_sizes]
-    # lstms = [STLSTMCell(size) for size in lstm_sizes]
-    lstms = [tf.nn.rnn_cell.LSTMCell(size) for size in lstm_sizes]
-
-    # Add dropout to the cell
-    # drops = [tf.contrib.rnn.DropoutWrapper(lstm, output_keep_prob=keep_prob_) for lstm in lstms]
-
-    # Stack up multiple LSTM layers, for deep learning
-    # cell = tf.contrib.rnn.MultiRNNCell(lstms)
-    cell = tf.nn.rnn_cell.MultiRNNCell(lstms)
-
-    # Getting an initial state of all zeros
-    initial_state = cell.zero_state(batch_size, tf.float32)
-    # sc = tf.nn.rnn_cell.LSTMStateTuple(tf.zeros([1, lstm_sizes[0]], tf.float32),tf.zeros([1, lstm_sizes[0]], tf.float32))
-    # sh = tf.nn.rnn_cell.LSTMStateTuple(tf.zeros([1, lstm_sizes[0]], tf.float32),tf.zeros([1, lstm_sizes[0]], tf.float32))
-    # initial_state = (tf.zeros([1, lstm_sizes[0]*2], tf.float32),tf.zeros([1, lstm_sizes[0]*2], tf.float32))
-
-    # lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, initial_state=initial_state)
-    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, dtype=tf.float32)
-
-    return initial_state, lstm_outputs, final_state, inputs
-
-
-
-
-
-# TFRecords dataset paths
+# Parse args
+mode = 'train'
+dataset = None
 dataset_name = "office"
-train_dataset = "../DATA/Cornell/{}_train_cornell.tfrecords".format(dataset_name)
-valid_dataset = "../DATA/Cornell/{}_test_cornell.tfrecords".format(dataset_name)
+NB_CLASSES = None
+class_ids = None
+classnames = None
+parse_args()
+
+# Print parameters
+blue = '\33[0;36m'
+bbold = '\33[1;36m'
+print("{}PARAMETERS\n{}".format(bbold, blue))
+print("{}MODE:{}\t\t{}".format(bbold, blue, mode))
+print("{}DATASET:{}\t{}".format(bbold, blue, dataset))
+print("{}CLASSES:{}\t{} classes - {}\n{}".format(bbold, blue, NB_CLASSES, class_ids, classnames))
+print("{}LSTM DIMS:{}\t{}".format(bbold, blue, NUM_UNITS))
+if mode == 'train':
+    print("{}ITERS:{}\t\t{}".format(bbold, blue, ITERS))
+    print("{}LEARNING RATE:{}\t{}".format(bbold, blue, LEARNING_RATE))
+print('\033[0m\n\n\n')
+if not input('Do you want to continue ? [y/n] ') in ['y', 'Y']:
+    sys.exit()
+
+# Load Data
+# TFRecords dataset paths
 # filename_queue = tf.train.string_input_producer([valid_dataset], num_epochs=1)
-if "office" in dataset_name:
-    NB_CLASSES = 10
-    class_ids = [0,1,9,17,18,19,22,37,41,42]
-    classnames = ['reading','walking','leave-office','fetch-book','put-back-book',
-                  'put-down-item','take-item','play-computer','turn-on-monitor',
-                  'turn-off-monitor']
-elif "kitchen" in dataset_name:
-    NB_CLASSES = 11
-    class_ids = [0,1,2,4,6,7,8,9,10,13,15]
-    classnames = ['fetch-from-fridge','put-back-to-fridge','prepare-food','microwaving',
-                  'fetch-from-oven','pouring','drinking','leave-kitchen','fill-kettle',
-                  'plug-in-kettle','move-kettle']
-else:
-    error("Use office or kitchen datasets only !")
 
 
-tfrecord_dataset = tf.data.TFRecordDataset(train_dataset)
+# Dataset classes
+# if "office" in dataset_name:
+#     NB_CLASSES = 10
+#     class_ids = [0,1,9,17,18,19,22,37,41,42]
+#     classnames = ['reading','walking','leave-office','fetch-book','put-back-book',
+#                   'put-down-item','take-item','play-computer','turn-on-monitor',
+#                   'turn-off-monitor']
+# elif "kitchen" in dataset_name:
+#     NB_CLASSES = 11
+#     class_ids = [0,1,2,4,6,7,8,9,10,13,15]
+#     classnames = ['fetch-from-fridge','put-back-to-fridge','prepare-food','microwaving',
+#                   'fetch-from-oven','pouring','drinking','leave-kitchen','fill-kettle',
+#                   'plug-in-kettle','move-kettle']
+# else:
+#     error("Use office or kitchen datasets only !")
+
+# Load data
+tfrecord_dataset = tf.data.TFRecordDataset(dataset)
 tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=1000)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
-tfrecord_dataset = tfrecord_dataset.repeat()
+if mode == 'train':
+    tfrecord_dataset = tfrecord_dataset.repeat()
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
 # pad_shapes = (tf.TensorShape([None, None, CHANNELS]),
 #               tf.TensorShape([None, 25, 3]),
@@ -315,26 +404,22 @@ inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, bat
 loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
 pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
 ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="ground_truth_placeholder")
-# outputs = tf.placeholder(tf.float32, (None, None, OUTPUT_SIZE)) # (time, batch, out)
+
 
 
 # ------------------
 # Define the graph
 # ------------------
-# init_state, outputs, final_state, inp = build_lstm([16], inputs, None, BATCH_SIZE)
+# TODO: Add args to change ST-LSTM hyperparameters
 outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True) # do_norm=True
 # Loss
 # loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
 loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]   # From last to first
 
 # Trainer - Backward propagation
-# opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)       # or use GradientDescentOptimizer
-# update_ops = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-# with tf.control_dependencies(update_ops):
 # train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
 train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
                for lo in loss_list]
-
 
 # Add the variable initializer Op.
 init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
@@ -344,34 +429,39 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 sess = tf.Session(config=config)
 
-# Summary
+# Summary - Tensorboard variables
+# TODO: automatic generation of varnames
 varnames = ["ST-LSTM/layer1/kernel", "ST-LSTM/layer2/kernel", "ST-LSTM/GCACell/We1",
             "ST-LSTM/GCACell/We2","ST-LSTM/kernel_F1", "ST-LSTM/kernel_F2", "ST-LSTM/Wc"]
 sm_loss = tf.summary.scalar(name='AVG Loss', tensor=tf.reduce_mean(loss_list))
 sm_accuracy = tf.summary.scalar(name='Accuracy', tensor=pl_accuracy)
 writer = tf.summary.FileWriter('./log2', sess.graph)
 with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
-    # weights_summary = tf.summary.histogram('Weights', tf.get_variable("layer1/kernel"))
-    # weights_summary2 = tf.summary.histogram('Weights2', tf.get_variable("layer2/kernel"))
     weights_summaries = [tf.summary.histogram(vname, tf.get_variable(vname[8:])) for vname in varnames]
+merged_summary_op = tf.summary.merge_all()
 
-# Save / Restore weights
-log_file = 'log_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
+# Saver to save weights
+log_file = 'logs/log_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
 weights_file = "gca_lstm"
-saver = tf.train.Saver(max_to_keep=4)
-# if os.path.isfile('./gca_lstm.ckpt.index'):
-#     saver.restore(sess, tf.train.latest_checkpoint('./gca_lstm.ckpt'))
+saver = tf.train.Saver(max_to_keep=10)
+# restore weights if needed (valid/test)
+if os.path.isfile('./gca_lstm.ckpt.index') and mode in ['test','valid']:
+    saver.restore(sess, tf.train.latest_checkpoint('./gca_lstm.ckpt'))
 
 # Run the session
 sess.run(init_op)
 sess.run(tfrecord_iterator.initializer)
 
+# Validation/Test variables
+stats = np.zeros((NB_CLASSES,4))      # [TP,TN,FP,FN]
+
 total_accuracy = 0.0
 total_count = 0
+# TODO: Loop for validation/test
 for i in range(1,ITERS+1):
     log = ''
 
-    # TEST
+    # DEBUG - Data loading
     # imgs, jts, aclasses, bds, tstates = sess.run(next_element)
     # print('Images:\t\t',imgs.shape)
     # print('Joints:\t\t',jts.shape)
@@ -389,6 +479,7 @@ for i in range(1,ITERS+1):
     except ValueError:
         warning("Issue while parsing {}".format(fname))
         continue
+    # DEBUG - Parsing data
     # bds = parse_body(bds)
     # jts = np.array(parse_joints(jts, tStates, bds))
     # print(imgs.shape)
@@ -414,7 +505,8 @@ for i in range(1,ITERS+1):
     # print('\n\n',inps.shape,np.array(out).shape)
     # out = sess.run(outputs, feed_dict={inputs:jts})
 
-    start, end = 0, 1
+    # Loop vars
+    start, end = 0, 1       # size of window
     losses = []
     avg_loss = 0.0
     accuracy, count = 0.0, 0
@@ -428,12 +520,22 @@ for i in range(1,ITERS+1):
         if ac[k] == -1:
             start = k
             continue
+
+        # Window - subset of data
         indata = jts[:,start:end,:,:]
+        # Ground Truth label
         gt = np.reshape(class_ids.index(int(ac[k])), (1,1))
         # out = sess.run(outputs, feed_dict={inputs: indata})
         # print(out)
-        results, lo, _, sm_lo, sm_weights = sess.run([outputs, loss_list, train_steps, sm_loss, weights_summaries],
+
+        # Train
+        if mode == 'train':
+            results, lo, _, sm_lo, sm_weights = sess.run([outputs, loss_list, train_steps, sm_loss, weights_summaries],
                                feed_dict={inputs: indata, ground_truth: gt})
+        elif mode == 'test':
+            results = sess.run([outputs], feed_dict={inputs: indata, ground_truth: gt})
+
+        # Get loss and predictions
         losses.append(lo[0])
         predicted_class = classnames[results[-1].argmax()]
         gtruth_class = classnames[class_ids.index(ac[k])]
@@ -449,25 +551,34 @@ for i in range(1,ITERS+1):
         count += 1
         if results[-1].argmax() == class_ids.index(ac[k]):
             accuracy += 1
+        # Update stats
+        stats = update_stats(stats, class_ids.index(ac[k]), results[-1])
 
+    # Compute average accuracy and average loss
     total_accuracy += accuracy
     total_count += count
     accuracy = accuracy / count
     avg_loss = np.array(losses).mean()
+
     # Print Loss and Accuracy and save to log
     line = "AVG Loss = {}\nAccuracy = {}\n".format(avg_loss, accuracy)
     print(line)
     with open(log_file, 'a') as flog:
         flog.write(log + line + '\n')
+
+    # Save weights, accuracy and loss values for tensorboard
     if i%10 == 0:
-        sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
-        writer.add_summary(sm_acc, global_step=i)
-        writer.add_summary(sm_lo, global_step=i)
-        for sm_w in sm_weights:
-            writer.add_summary(sm_w, global_step=i)
+        # sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
+        # writer.add_summary(sm_acc, global_step=i)
+        # writer.add_summary(sm_lo, global_step=i)
+        # for sm_w in sm_weights:
+        #     writer.add_summary(sm_w, global_step=i)
+        merged_summary = sess.run(merged_summary_op, feed_dict={pl_accuracy:accuracy})
+        writer.add_summary(merged_summary, global_step=i)
+
+    # Save weights each 1000 iterations
     if i%1000 == 0:
         saver.save(sess, "./{}".format(weights_file), global_step=i)
-
 
 
 # Write summary
@@ -493,16 +604,18 @@ for i in range(1,ITERS+1):
 sess.close()
 
 # Copy weights
-nbt = 1
-for dir in os.listdir('weights'):
-    if not os.path.isdir('weights/{}'.format(dir)):
-        continue
-    if 'Train_' in dir:
-        dir += 1
-os.makedirs('weights/Train_{:03d}'.format(nbt))
-for fi in os.listdir('.'):
-    if os.path.isfile(fi) and weights_file in fi:
-        copy2(fi, 'weights/Train_{:03d}/'.format(nbt))
-copy2('checkpoint', 'weights/Train_{:03d}/'.format(nbt))
+if mode == 'train':
+    nbt = 1
+    for dir in os.listdir('weights'):
+        if not os.path.isdir('weights/{}'.format(dir)):
+            continue
+        if 'Train_' in dir:
+            dir += 1
+    os.makedirs('weights/Train_{:03d}'.format(nbt))
+    for fi in os.listdir('.'):
+        if os.path.isfile(fi) and weights_file in fi:
+            copy2(fi, 'weights/Train_{:03d}/'.format(nbt))
+    copy2('checkpoint', 'weights/Train_{:03d}/'.format(nbt))
+    print('Saved weights into weights/Train_{:03d}/'.format(nbt))
 
 print('Done')

@@ -171,7 +171,7 @@ def gen_coco_example(dataDir, dataType):
 # Generate Example for Cornell Dataset
 def gen_cornell_example(dataDir, dataType, split=None):
     # Open TFRecords file
-    filename = '{}/{}_{}_cornell.tfrecords'.format(dataDir, dataType, split[:split.index('_')])
+    filename = '{}/{}_{}.tfrecords'.format(dataDir, dataType, split[:split.index('_')])
     check_filename(filename)
     writer = tf.python_io.TFRecordWriter(filename)
 
@@ -182,7 +182,7 @@ def gen_cornell_example(dataDir, dataType, split=None):
         folders = [sp[0] for sp in msplit[split][0]]
 
     for fid, folder in enumerate(folders):
-        print('[{}/{}]'.format(str(fid), str(len(folders))), end='\r')
+        print('[{}/{}]'.format(str(fid+1), str(len(folders))), end='\r')
         sys.stdout.flush()
         if not os.path.isdir(path + folder + '/rgbjpg'):
             error('No "rgbjpg" folder in ' + path + folder)

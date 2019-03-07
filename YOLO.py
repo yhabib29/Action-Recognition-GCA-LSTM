@@ -40,9 +40,8 @@ CLASSES_ID = [c for c in range(1, 91) if c not in [12, 26, 29, 30, 45, 66, 68, 6
 # ------------------------
 
 
-def info(msg, end=None):
+def info(msg, end=None, std='\33[0m'):
     blue = '\33[36;1m'
-    std = '\33[0m'
     if end == None:
         print(blue + msg + std)
     else:
