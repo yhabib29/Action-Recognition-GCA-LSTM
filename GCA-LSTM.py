@@ -576,7 +576,6 @@ def train(log_file_):
     return True
 
 
-
 # ------------------------
 #          TEST
 # ------------------------
@@ -640,7 +639,9 @@ def test(log_file_):
                 warning("Issue while parsing {}".format(fname))
                 continue
 
-            print("Iter {}: {} [{},{}] - {}".format(it, fname, w, h, jts.shape))
+            line = "Iter {}: {} [{},{}] - {}".format(it, fname, w, h, jts.shape)
+            log += line + "\n"
+            print(line)
 
             # For now use only one body
             jts = jts[0]
@@ -683,7 +684,11 @@ def test(log_file_):
                 # gtruth_class = classnames[class_ids.index(ac[k])]
                 # Print predictions and save to log
                 line = "[{}] Predicted = {} / Truth = {}  \tScores={}".format(end - start, results[-1].argmax(),
-                                                                              class_ids.index(ac[k]), results[-1].tolist())
+                                                                              class_ids.index(ac[k]),
+                                                                              results[-1].tolist())
+                print("[{}] Predicted = {} / Truth = {}".format(end - start,
+                                                                results[-1].argmax(),
+                                                                class_ids.index(ac[k])))
                 # print(line)
                 log += line + '\n'
                 start = k
@@ -702,7 +707,7 @@ def test(log_file_):
             # Print Loss and Accuracy and save to log
             line = "Accuracy = {:0.4f}".format(accuracy)
             print(line)
-            with open(log_file, 'a') as flog:
+            with open(log_file_, 'a') as flog:
                 flog.write(log + line + '\n')
 
             # Save accuracy for tensorboard
