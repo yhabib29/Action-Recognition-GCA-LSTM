@@ -25,6 +25,21 @@ Adding Object detection in the input pipeline may improve the results.
 Main file for activity recognition.
 Using Cornell Dataset [4]
 
+```--help [-h]			Show help
+--mode [-m]	MODE		Choose between Training ('train') and Test ('test') mode
+--dataset [-d]	PATH		Path to the TFRecords dataset or use 'office'/'kitchen' for Cornell dataset
+--class [-c]	PATH		Path to the class file containing class IDs and Class names where each line is: ID CLASS_NAME
+--weights [-w]	PATH		Output path without extension where to save/load the trained weights (default: './gca_lstm')
+--dim [-n]	DIM_LIST	LSTM layers dimension list (default: '128,128')
+--lr [-l]	LEARNING_RATE	Learning Rate
+--iter [-i]	ITERATIONS	Number of training iterations
+```
+
+Example:
+```python3 GCA-LSTM.py -m train -l 0.0015 -i 10000-n 128,128 -d ../DATA/Cornell/office_train.tfrecords -c ../DATA/Cornell/office.class -w ./gca_lstm
+python3 GCA-LSTM.py -m test -d ../DATA/Cornell/office_test.tfrecords -c ../DATA/Cornell/office.class -w ./gca_lstm
+```
+
 ### ST-LSTM.py [Stable]
 Implementation of a SpatioTemporal LSTM Cell [1] [2] based on Tensorflow source code and other references:
 - add references
