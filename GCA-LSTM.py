@@ -378,7 +378,8 @@ def train(log_file_):
 
     # Loss
     # loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
-    loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]  # From last to first
+    # loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]  # From last to first
+    loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in outputs]  # From first to last
 
     # Trainer - Backward propagation
     # train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
