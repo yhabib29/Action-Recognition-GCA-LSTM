@@ -31,15 +31,56 @@ def check_filename(fname):
     return
 
 
+def get_help():
+    gbold = '\033[1;32m'
+    green = '\033[0;32m'
+    dpath_1 = '../home/amusaal/DATA/Coco'
+    dpath_2 = '../home/amusaal/DATA/Cornell'
+    dtype_1 = 'val2014'
+    dtype_2 = 'kitchen'
+    mhelp =  gbold + "This script is used to convert Coco and Cornell datasets to TFRecords file\n"
+    mhelp += "COCO:\t\tdataDir is the directory containing the folder dataType which contains all images\n"
+    mhelp += "\t\tCOCO Python API is required (pip install pycocotools)\n"
+    mhelp += "Cornell:\tdataDir is the directory containing the folder dataType (kitchen/office)\n"
+    mhelp += "\t\tIt also contains split files, and classnames files.\n\n"
+    mhelp += "--help [-h]\t\t\t" + green
+    mhelp += "Show help\n"
+    mhelp += gbold + "--dataDir [-d]\tPATH\t\t" + green
+    mhelp += "Path to the directory of the dataset\n"
+    mhelp += gbold + "--dataType [-t]\tNAME\t\t" + green
+    mhelp += "Name of the folder containing data. It will be used as the output prefix.\n\n"
+    mhelp += gbold + "Example:\n" + green
+    mhelp += "python3 convert_Dataset_to_TFRecord.py --dataDir {} --dataType {}\n".format(dpath_1, dtype_1)
+    mhelp += "python3 convert_Dataset_to_TFRecord.py -d {} -t {}\n\n".format(dpath_2, dtype_2)
+    mhelp += '\033[0m'
+    return mhelp
+
+
 def parser():
     global dataDir, dataType
     argv = sys.argv
     argc = len(argv)
+    help_ = get_help()
     for a, arg in enumerate(argv):
-        if arg == "--dataDir" and a + 1 < argc:
-            dataDir = argv[a + 1]
-        elif arg == "--dataType" and a + 1 < argc:
+        if a == argc-1:
+            if arg in ['--help', '-h']:
+                print(help_)
+                sys.exit()
+            break
+        elif arg in ['--help', '-h']:
+            print(help_)
+            sys.exit()
+        elif arg in ["--dataDir", "-d"]:
+            if os.path.isdir(argv[a + 1]):
+                dataDir = argv[a + 1]
+            else:
+                error('Error: Invalid directory {}'.format(argv[a + 1]))
+        elif arg in ["--dataType", "-t"]:
             dataType = argv[a + 1]
+        else:
+            continue
+    if not os.path.isdir('{}/{}'.format(dataDir, dataType)):
+        error('Error: could not find {} in {}'. format(dataType,dataDir))
     print("dataDir =\t" + dataDir)
     print("dataType =\t" + dataType)
     return
