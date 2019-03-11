@@ -40,7 +40,7 @@ Using Cornell Dataset [4]
 ```
 
 Example:
-```python3 GCA-LSTM.py -m train -l 0.0015 -i 10000-n 128,128 -d ../DATA/Cornell/office_train.tfrecords -c ../DATA/Cornell/office.class -w ./gca_lstm
+```python3 GCA-LSTM.py -m train -l 0.0015 -i 10000 -n 128,128 -d ../DATA/Cornell/office_train.tfrecords -c ../DATA/Cornell/office.class -w ./gca_lstm
 python3 GCA-LSTM.py -m test -d ../DATA/Cornell/office_test.tfrecords -c ../DATA/Cornell/office.class -w ./gca_lstm
 ```
 
