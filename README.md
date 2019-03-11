@@ -1,3 +1,7 @@
+# CODE COMMENTS COMING SOON ...
+
+
+
 # Research Project - F4
 Activities Recognition
 
