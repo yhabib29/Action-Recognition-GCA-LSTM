@@ -587,6 +587,7 @@ def train(log_file_):
         # print('Joints', jts.shape, jts)
 
         print("Iter {}: {} [{},{}] - {}".format(i, fname, w, h, jts.shape))
+        log += "Iter {}: {} [{},{}] - {}\n".format(i, fname, w, h, jts.shape)
 
         # For now use only one body
         if len(jts.shape) == 3:
@@ -607,6 +608,7 @@ def train(log_file_):
 
             # Window - subset of data
             indata = jts[:, start:end, :, :]
+            print(start,end,indata.shape)
             # Ground Truth label
             gnd = ac[end-1]
             gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
