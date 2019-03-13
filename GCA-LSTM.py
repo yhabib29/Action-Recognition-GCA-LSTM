@@ -500,6 +500,7 @@ def train(log_file_):
     outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True)  # do_norm=True
 
     # Loss
+    # TODO: Train loss on the whole sequence
     # loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
     # loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]  # From last to first
     loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in outputs]  # From first to last
@@ -616,14 +617,18 @@ def train(log_file_):
             # print(out)
 
             # Train
-            results, lo, _, sm_lo = sess.run([outputs, loss_list, train_steps, sm_loss],
+            try:
+                results, lo, _, sm_lo = sess.run([outputs, loss_list, train_steps, sm_loss],
                                              feed_dict={inputs: indata, ground_truth: gt})
+            except tf.python.framework.errors_impl.InvalidArgumentError:
+                print(gnd, gt, end, ac[end - 1:end + 1])
+                sys.exit(-1)
             # results, lo, _, sm_lo, sm_weights = sess.run([outputs, loss_list, train_steps,
             #                                               sm_loss, weights_summaries],
             #                                              feed_dict={inputs: indata, ground_truth: gt})
 
             # Get loss and predictions
-            losses.append(lo[0])
+            losses.append(lo[-1])
             predicted_class = classnames[results[-1].argmax()]
             gtruth_class = classnames[class_ids.index(gnd)]
             # Print predictions and save to log
