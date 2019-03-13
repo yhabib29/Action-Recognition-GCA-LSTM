@@ -6,6 +6,7 @@ import numpy as np
 from shutil import copy2
 from datetime import datetime
 # import cv2
+import traceback
 
 
 # ------------------------
@@ -14,12 +15,15 @@ from datetime import datetime
 
 
 CHANNELS = 3
+# Batch size be 1 for now, because dataset sequences have different length.
+# Or need to use padding and post-processing to use batch
 BATCH_SIZE = 1
-# NB_CLASSES = 10
 LEARNING_RATE = 0.0015
-ITERS = 10000   # 10000
+ITERS = 10000
 NUM_UNITS = [128,128]
+# Number of joints used by the network
 JOINTS = 16
+# Joints indexing correspondence table
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 
 
@@ -29,6 +33,11 @@ GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 
 
 def isfloat(value):
+    """
+    Define if value can be convered to float
+    :param value:   int or string to test
+    :return:        True if it is a float, False if not
+    """
     try:
         float(value)
         return True
@@ -37,18 +46,32 @@ def isfloat(value):
 
 
 def sigmoid(x, derivative=False):
+    """
+    Sigmoid function
+    :param x:               Input value
+    :param derivative:      Use derivative or not
+    :return:                Sigmoid(x)
+    """
     sigm = 1. / (1. + np.exp(-x))
     if derivative:
         return sigm * (1. - sigm)
     return sigm
 
 def warning(msg):
+    """
+    Tool to print Warning message
+    :param msg:     Warning message to print
+    """
     orange ='\033[33m'
     end = '\033[0m'
     print(orange + msg + end)
     return
 
 def error(msg):
+    """
+    Tool to print error message and exit program
+    :param msg:     Error message to print
+    """
     red = '\033[31m'
     end = '\033[0m'
     print(red + msg + end)
@@ -57,6 +80,10 @@ def error(msg):
 
 
 def get_help():
+    """
+    Generate help message with program arguments
+    :return:    Help message
+    """
     gbold = '\033[1;32m'
     green = '\033[0;32m'
     dpath = '../DATA/Cornell/office_train.tfrecords'
@@ -79,7 +106,7 @@ def get_help():
     mhelp += gbold + "--iter [-i]\tITERATIONS\t" + green
     mhelp += "Number of training iterations\n\n"
     mhelp += gbold + "Example:\n" + green
-    mhelp += "python3 GCA-LSTM.py -m train -l 0.0015 -i 10000"
+    mhelp += "python3 GCA-LSTM.py -m train -l 0.0015 -i 10000 "
     mhelp += "-n 128,128 -d {} -c {} -w ./gca_lstm\n".format(dpath, cpath)
     mhelp += "python3 GCA-LSTM.py -m test -d {} -c {} -w ./gca_lstm\n\n".format(tpath, cpath)
     mhelp += '\033[0m'
@@ -87,6 +114,11 @@ def get_help():
 
 
 def read_dims(dims):
+    """
+    Parse LSTM dimensions argument
+    :param dims:    String representing dimension list: 'dim1,dim2,dim3'
+    :return:        List of LSTMs dimension
+    """
     num_units_ = []
     lim = len(dims)
     start_ = 0
@@ -105,8 +137,7 @@ def read_dims(dims):
 
 def read_class(class_file_):
     """
-    Parse class file where each line is
-    ID CLASS_NAME
+    Parse class file where each line is: ID CLASS_NAME
     :param class_file:                      Path to the class file
     :return: nb_classes, cids, cnames       Number of classes, Class IDs, Class names
     """
@@ -148,6 +179,9 @@ def read_class(class_file_):
 
 
 def parse_args():
+    """
+    Parse program arguments
+    """
     global ITERS, NB_CLASSES, NUM_UNITS, LEARNING_RATE
     global mode, dataset, dataset_name, class_ids, classnames, weights_file
     help_ = get_help()
@@ -163,7 +197,7 @@ def parse_args():
         elif arg in ['--help', '-h']:
             print(help_)
             sys.exit()
-        # - train/test
+        # - Mode
         elif arg in ['--mode', '-m']:
             if argv[a+1] in ['train', 'test']:
                 mode = argv[a+1]
@@ -172,7 +206,7 @@ def parse_args():
         # - Iterations
         elif arg in ['--iter', '-i']:
             if argv[a+1].isdigit():
-                ITERS = argv[a+1]
+                ITERS = int(argv[a+1])
             else:
                 error('Error: Invalid number of iterations')
         # - Dataset
@@ -196,7 +230,7 @@ def parse_args():
         # - Learning Rate
         elif arg in ['--lr', '-l']:
             if isfloat(argv[a+1]):
-                LEARNING_RATE = argv[a+1]
+                LEARNING_RATE = float(argv[a+1])
             else:
                 error('Error: Invalid value for learning rate, it must be a float not {}'.format(argv[a+1]))
         # - LSTM dims
@@ -227,6 +261,16 @@ def parse_args():
 
 
 def update_stats(stats_, label_, predictions_):
+    """
+    Update stats for test/validation mode.
+    :param stats_:          Global stats array [TP,TN,FP,FN]
+    :param label_:          Ground truth label
+    :param predictions_:    List of predictions for each class
+    :type stats_:           list
+    :type label_:           int
+    :type predictions_:     numpy.array
+    :return:                Updated stats array
+    """
     positive_class = predictions_.argmax()
     for n in range(len(stats_)):
         if n == positive_class:
@@ -246,28 +290,83 @@ def update_stats(stats_, label_, predictions_):
     return stats_
 
 
+def gen_order(gnd_classes):
+    """
+    Generate list of intervals to split the original sequence into variable length sequence with the same action.
+    :param gnd_classes:     Ground Truth classes
+    :return:                List of intervals
+    """
+    changes = [g for g in range(1,len(gnd_classes)) if gnd_classes[g-1] != gnd_classes[g]]
+    order_ = []
+    start = 0
+    # Select all frames sequences label per label
+    for g in changes:
+        if gnd_classes[g-1] != -1:
+            order_.append([start, g])
+        start = g
+    if gnd_classes[start] != -1:
+        order_.append([start,len(gnd_classes)])
+    # TODO: Remove this block
+    # for k in range(1, len(gnd_classes)):
+    #     # Move start to get only data with label
+    #     if gnd_classes[k-1] == -1:
+    #         start = k
+    #         continue
+    #     # Last frame
+    #     if k + 1 == len(gnd_classes) and gnd_classes[k] != -1:
+    #         end = k + 1
+    #         order_.append([start, end])
+    #     # If next frame is the same action
+    #     elif gnd_classes[k] == gnd_classes[k - 1]:
+    #         continue
+    #     elif gnd_classes[k] != gnd_classes[k - 1]:
+    #         end = k
+    #         order_.append([start, end])
+    #         start = k
+    return order_
+
+
+
 # ------------------------
 #          DATA
 # ------------------------
 
 
 def _parse_(serialized_example):
+    """
+    Parse TFRecord dataset and extract data.
+    :param serialized_example:  Serialized example of the TFRecord dataset (1 sequence)
+    :return: (Images, Classes, Joints, trackingStates, Bodies, Height, Width, nb_frames, framename)
+                Images:     Array of all sequence images
+                Classes:    Array of all images activity class
+                Joints:     3D coordinates of every bodies in each frame
+                Bodies:     Array of bodies ID in each frame
+                Height:     Height of sequence images
+                Width:      Width of sequence images
+                nb_frames:  Number of images in the sequence
+                framename:  Name of the sequence
+    """
+    # Define context structure
     context = {
         'name': tf.FixedLenFeature([], dtype=tf.string),
         'nb_frames': tf.FixedLenFeature([], dtype=tf.int64),
         'height': tf.FixedLenFeature([], dtype=tf.int64),
         'width': tf.FixedLenFeature([], dtype=tf.int64)
     }
+    # Define feature structure
     feature = {'images': tf.FixedLenSequenceFeature([], dtype=tf.string),
                'classes': tf.FixedLenSequenceFeature([], dtype=tf.int64),
                'bodies': tf.FixedLenSequenceFeature([], dtype=tf.int64),
                'joints': tf.VarLenFeature(dtype=tf.float32),
                'trackingStates': tf.VarLenFeature(dtype=tf.int64)
     }
+    # Parse data from defined structures
     ctx,features = tf.parse_single_sequence_example(serialized_example,context,feature)
+    # Images decoding
     images = tf.map_fn(tf.image.decode_jpeg, features['images'], dtype=tf.uint8)
     images = tf.map_fn(lambda x: tf.reverse(x, axis=[-1]), images, dtype=tf.uint8)
     # images = features['images']
+    # Cast other data
     # joints = tf.sparse.to_dense(features['joints'])
     # trackingStates = tf.sparse.to_dense(features['trackingStates'])
     # bodies = tf.sparse.to_dense(features['bodies'], default_value=-1)
@@ -280,44 +379,58 @@ def _parse_(serialized_example):
 
     joints = tf.sparse.to_dense(features['joints'])
     trackingStates = tf.sparse.to_dense(features['trackingStates'])
-    joints = tf.reshape(joints, [nb_frames,25,3])
+    joints = tf.reshape(joints, [nb_frames, 25, 3])
 
     # return (image, joints, aclass, bodies, trackingStates)
     return (images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, framename)
 
 
-def convertJoints(joints):
-    new_joints = [0] * JOINTS
-    zero3D = [0.,0.,0.]
-    for j in range(JOINTS):
-        joint = joints[GCA_KINECT[j]]
-        if joint != zero3D:
-            new_joints[j] = joint
-            continue
-        else:
-            if j == 2:
-                joint = joints[2]
-            elif j == 12:
-                joint = joints[19]
-            elif j == 15:
-                joint = joints[15]
-            elif j == 5:
-                for jj in [11,24,23]:
-                    joint = joints[jj]
-                    if joint != zero3D:
-                        break
-            elif j == 8:
-                for jj in [7,22,21]:
-                    joint = joints[jj]
-                    if joint != zero3D:
-                        break
-            new_joints[j] = joints
-    return joints
+def convertJoints(joints_array):
+    """
+    TODO: Adapt this function to work with others indexing
+    Convert Cornell joints indexing to GCA indexing.
+    :param joints:  Joints coordinates array
+    :return:        Converted joints array
+    """
+    jshape = (joints_array.shape[0], JOINTS, 3)
+    new_joints_array = np.zeros((jshape))
+    for f in range(len(joints_array)):
+        joints = joints_array[f,:,:]
+        new_joints = [0] * JOINTS
+        for j in range(JOINTS):
+            joint = joints[GCA_KINECT[j]]
+            if np.any(joint != 0):
+                new_joints[j] = joint
+                continue
+            else:
+                if j == 2:
+                    joint = joints[2]
+                elif j == 12:
+                    joint = joints[19]
+                elif j == 15:
+                    joint = joints[15]
+                elif j == 5:
+                    for jj in [11,24,23]:
+                        joint = joints[jj]
+                        if np.any(joint != 0):
+                            break
+                elif j == 8:
+                    for jj in [7,22,21]:
+                        joint = joints[jj]
+                        if np.any(joint != 0):
+                            break
+                new_joints[j] = joint
+        new_joints_array[f,:,:] = new_joints
+    return new_joints_array
 
 
 def parse_data(joints_data, bodies_data):
     """
-    Parse raw data loaded from TFRecord and extract structured joints lists
+    TODO: Remove this function because the array structure has been fixed in conversation script
+    Parse raw data loaded from TFRecord and extract structured joints lists.
+    Each frame may contain multiple bodies. We have a list containing all the joints
+    coordinates of the sequence. For each frame, we also have a list of bodies ID present in the image. If there is
+    nobody, the list is [-1].
     :param joints_data:
     :param bodies_data:
     :return: joints_list    np.array of shape (body,frame,joint,3)
@@ -327,17 +440,23 @@ def parse_data(joints_data, bodies_data):
     # tstates_list = []
     b, fr = 0, 0
     while b < len(bodies_data):
+        # Nobody in the image
         if bodies_data[b] == -1:
             fr += 1
             b += 1
             continue
         # bd = []
+        # Initialize the frame bodies number
         nbb = 0
+        # TODO: Double check if there are 6 or 7 bodies
+        # TODO: Check if there is one class per body per frame
         for nb in range(6):
+            # Test if we will exceed the sequence bodies list
             if b + nbb >= len(bodies_data):
                 nbb += 1
                 continue
             if bodies_data[b + nbb] == nb:
+                # If it is the first time we see the body, we add zero coords for previous frames
                 if not nb in joints_dict.keys():
                     joints_dict[nb] = fr * [[0,0,0]]
                 if len(joints_dict[nb]) != fr:
@@ -355,7 +474,11 @@ def parse_data(joints_data, bodies_data):
     joints_list = np.zeros((len(nk), fr, JOINTS, 3))
     for e,k in enumerate(nk):
         # joints_list[e, :, :, :] = np.array(joints_dict[k])
-        joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,JOINTS,3))
+        try:
+            joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,JOINTS,3))
+        except ValueError:
+            print(joints_dict[k])
+            sys.exit(-11)
     return joints_list
 
 
@@ -434,14 +557,24 @@ def train(log_file_):
         # Pre-process
         fname = fname.decode('UTF-8')
         ac = np.array(ac) - 1
-        try:
-            jts = parse_data(jts, bds)
-        except ValueError:
-            warning("Issue while parsing {}".format(fname))
+
+        if bds.shape[0] != jts.shape[0]:
+            warning('Bodies and joints data have different length (not handled yet)')
             continue
 
+        # Convert joints
+        jts = convertJoints(jts)
+
+        # TODO: Remove this block
+        # try:
+        #     jts = parse_data(jts, bds)
+        #     continue
+        # except ValueError:
+        #     warning("Issue while parsing {}".format(fname))
+        #     traceback.print_exc()
+        #     sys.exit(-10)
+
         # DEBUG - Parsing data
-        # bds = parse_body(bds)
         # jts = np.array(parse_joints(jts, tStates, bds))
         # print(imgs.shape)
         # print(h,w,nbf)
@@ -456,36 +589,27 @@ def train(log_file_):
         print("Iter {}: {} [{},{}] - {}".format(i, fname, w, h, jts.shape))
 
         # For now use only one body
-        jts = jts[0]
         if len(jts.shape) == 3:
             jts = jts.reshape((1,) + jts.shape)
             # jts = np.swapaxes(jts,0,1)
             # jts = np.swapaxes(jts, 1, 2)
         # print(jts.shape)    # shape = (frames,25,batch,3)
-        # init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
-        # print('\n\n',inps.shape,np.array(out).shape)
-        # out = sess.run(outputs, feed_dict={inputs:jts})
 
         # Loop vars
         start, end = 0, 1  # size of window
         losses = []
         avg_loss = 0.0
         accuracy, count = 0.0, 0
+        # Generate order (variable sequence length)
+        order = gen_order(ac)
         # Select all frames sequences label per label
-        for k in range(1, len(ac)):
-            end = k
-            if k + 1 == len(ac):
-                end = k + 1
-            elif ac[k] == ac[k - 1]:
-                continue
-            if ac[k] == -1:
-                start = k
-                continue
+        for start, end in order:
 
             # Window - subset of data
             indata = jts[:, start:end, :, :]
             # Ground Truth label
-            gt = np.reshape(class_ids.index(int(ac[k])), (1, 1))
+            gnd = ac[end-1]
+            gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
             # out = sess.run(outputs, feed_dict={inputs: indata})
             # print(out)
 
@@ -499,22 +623,22 @@ def train(log_file_):
             # Get loss and predictions
             losses.append(lo[0])
             predicted_class = classnames[results[-1].argmax()]
-            gtruth_class = classnames[class_ids.index(ac[k])]
+            gtruth_class = classnames[class_ids.index(gnd)]
             # Print predictions and save to log
-            # print("Predicted = {} / Truth = {}  \tScores={}".format(class_ids[results[-1].argmax()], ac[k],
+            # print("Predicted = {} / Truth = {}  \tScores={}".format(class_ids[results[-1].argmax()], gnd,
             #                                                         results[-1]))
             # print("Predicted = {} / Truth = {}  \tScores={}".format(predicted_class, gtruth_class,
             #                                                         results[-1]))
             line = "[{}] Predicted = {} / Truth = {}  \tScores={}".format(end - start,
                                                                           results[-1].argmax(),
-                                                                          class_ids.index(ac[k]),
+                                                                          class_ids.index(gnd),
                                                                           results[-1].tolist())
             print(line)
             log += line + '\n'
-            start = k
+            # start = k
             # Accuracy
             count += 1
-            if results[-1].argmax() == class_ids.index(ac[k]):
+            if results[-1].argmax() == class_ids.index(gnd):
                 accuracy += 1
 
         # Compute average accuracy and average loss
@@ -542,12 +666,6 @@ def train(log_file_):
         # Save weights each 1000 iterations
         if i % 1000 == 0:
             saver.save(sess, "./{}".format(weights_file), global_step=i)
-
-    # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
-    # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
-    # for im in imgs:
-    #     video.write(im)
-    # video.release()
 
     # Print Trainable variables
     # variables_names = [v.name for v in tf.trainable_variables()]
@@ -592,21 +710,17 @@ def test(log_file_):
     # TODO: Add args to change ST-LSTM hyperparameters
     outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True)  # do_norm=True
 
-    # TODO: Remove
-    # Add the variable initializer Op.
-    # init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
-
     # Create the session
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
 
     # Summary - Tensorboard variables
-    sm_accuracy = tf.summary.scalar(name='Accuracy', tensor=pl_accuracy)
+    sm_accuracy = tf.summary.scalar(name='Total Accuracy', tensor=pl_accuracy)
     writer = tf.summary.FileWriter('./log_gca_test', sess.graph)
     merged_summary_op = tf.summary.merge_all()
 
-    # Saver to save weights
+    # Saver to restore weights
     saver = tf.train.Saver()
     if os.path.isfile('{}.index'.format(weights_file)):
         # saver.restore(sess, tf.train.latest_checkpoint('{}'.format(weights_file)))
@@ -615,8 +729,6 @@ def test(log_file_):
         error('Error: Could not find weights file {}'.format(weights_file))
 
     # Run the session
-    # TODO: Remove init
-    # sess.run(init_op)
     sess.run(tfrecord_iterator.initializer)
 
     # Validation/Test variables
@@ -631,74 +743,82 @@ def test(log_file_):
 
             # Load scene
             imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+
             # Pre-process
             fname = fname.decode('UTF-8')
             ac = np.array(ac) - 1
-            try:
-                jts = parse_data(jts, bds)
-            except ValueError:
-                warning("Issue while parsing {}".format(fname))
+
+            if bds.shape[0] != jts.shape[0]:
+                warning('Bodies and joints data have different length (not handled yet)')
                 continue
+
+            # Convert joints
+            jts = convertJoints(jts)
+
+            # TODO: Remove this block
+            # try:
+            #     jts = parse_data(jts, bds)
+            # except ValueError:
+            #     warning("Issue while parsing {}".format(fname))
+            #     continue
 
             line = "Iter {}: {} [{},{}] - {}".format(it, fname, w, h, jts.shape)
             log += line + "\n"
             print(line)
 
             # For now use only one body
-            jts = jts[0]
             if len(jts.shape) == 3:
                 jts = jts.reshape((1,) + jts.shape)
                 # jts = np.swapaxes(jts,0,1)
                 # jts = np.swapaxes(jts, 1, 2)
             # print(jts.shape)    # shape = (frames,25,batch,3)
-            # init, out, fin, inps = sess.run([init_state, outputs, final_state, inp], feed_dict={inputs:jts[0]})
-            # print('\n\n',inps.shape,np.array(out).shape)
-            # out = sess.run(outputs, feed_dict={inputs:jts})
 
             # Loop vars
-            start, end = 0, 1  # size of window
-            losses = []
-            avg_loss = 0.0
+            # start, end = 0, 1  # size of window
             accuracy, count = 0.0, 0
+            # Generate order (variable sequence length)
+            order = gen_order(ac)
             # Select all frames sequences label per label
-            for k in range(1, len(ac)):
-                end = k
-                if k + 1 == len(ac):
-                    end = k + 1
-                elif ac[k] == ac[k - 1]:
-                    continue
-                if ac[k] == -1:
-                    start = k
-                    continue
+            for start,end in order:
 
                 # Window - subset of data
                 indata = jts[:, start:end, :, :]
                 # Ground Truth label
-                gt = np.reshape(class_ids.index(int(ac[k])), (1, 1))
-                # out = sess.run(outputs, feed_dict={inputs: indata})
+                gnd = ac[end-1]
+                gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
+
+                # Inference
+                results = sess.run(outputs, feed_dict={inputs: indata})
                 # print(out)
 
-                results = sess.run(outputs, feed_dict={inputs: indata})
-
-                # predictions
+                # Show predictions
                 # predicted_class = classnames[results[-1].argmax()]
-                # gtruth_class = classnames[class_ids.index(ac[k])]
+                # gtruth_class = classnames[class_ids.index(gnd)]
                 # Print predictions and save to log
                 line = "[{}] Predicted = {} / Truth = {}  \tScores={}".format(end - start, results[-1].argmax(),
-                                                                              class_ids.index(ac[k]),
+                                                                              class_ids.index(gnd),
                                                                               results[-1].tolist())
                 print("[{}] Predicted = {} / Truth = {}".format(end - start,
                                                                 results[-1].argmax(),
-                                                                class_ids.index(ac[k])))
-                # print(line)
+                                                                class_ids.index(gnd)))
                 log += line + '\n'
-                start = k
+                # start = k
+                # print(line)
+
                 # Accuracy
                 count += 1
-                if results[-1].argmax() == class_ids.index(ac[k]):
+                if results[-1].argmax() == class_ids.index(gnd):
                     accuracy += 1
+
                 # Update stats
-                stats = update_stats(stats, class_ids.index(ac[k]), results[-1])
+                stats = update_stats(stats, class_ids.index(gnd), results[-1])
+
+                # TODO: Make function to show predictions
+                # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
+                # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
+                # for im in imgs:
+                #     video.write(im)
+                # video.release()
 
             # Compute average accuracy and average loss
             total_accuracy += accuracy
@@ -706,7 +826,7 @@ def test(log_file_):
             accuracy = accuracy / count
 
             # Print Loss and Accuracy and save to log
-            line = "Accuracy = {:0.4f}".format(accuracy)
+            line = "Sequence Accuracy = {:0.4f}".format(accuracy)
             print(line)
             with open(log_file_, 'a') as flog:
                 flog.write(log + line + '\n')
@@ -714,7 +834,8 @@ def test(log_file_):
             # Save accuracy for tensorboard
             if it % 1 == 0:
                 # sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
-                merged_summary = sess.run(merged_summary_op, feed_dict={pl_accuracy: accuracy})
+                merged_summary = sess.run(merged_summary_op,
+                                          feed_dict={pl_accuracy: total_accuracy / total_count})
                 writer.add_summary(merged_summary, global_step=it)
 
             if it % 10 == 0:
@@ -730,10 +851,12 @@ def test(log_file_):
         pass
 
     # Print Recall and Accuracy
+    total_accuracy = total_accuracy / total_count
     precision = stats[:,0] / (stats[:,0] + stats[:,2])
     recall = stats[:,0] / (stats[:,0] + stats[:,3])
     print('Recall = {}'.format(recall.tolist()))
     print('Precision = {}'.format(precision.tolist()))
+    print('Total Accuracy: {}'.format(total_accuracy))
 
     # Close the session
     sess.close()
@@ -781,10 +904,13 @@ if not input('Do you want to continue ? [y/n] ') in ['y', 'Y']:
 tfrecord_dataset = tf.data.TFRecordDataset(dataset)
 tfrecord_dataset = tfrecord_dataset.shuffle(buffer_size=1000)
 tfrecord_dataset = tfrecord_dataset.map(lambda x: _parse_(x)).shuffle(True)
+# Infinite loop in dataset
 if mode == 'train':
     tfrecord_dataset = tfrecord_dataset.repeat()
+# Read all the element only once
 else:
     tfrecord_dataset = tfrecord_dataset.repeat(1)
+# Padded batch
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
 # pad_shapes = (tf.TensorShape([None, None, CHANNELS]),
 #               tf.TensorShape([None, 25, 3]),
@@ -793,6 +919,7 @@ else:
 #               tf.TensorShape([None, 25]))
 # pad_shapes = ([None, None, CHANNELS], [None, 25, 3], [1], [None], [None, 25])
 # tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
+# Iterator for reading data
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
 

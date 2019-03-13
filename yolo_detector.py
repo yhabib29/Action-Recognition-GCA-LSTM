@@ -1,4 +1,5 @@
 import sys
+# Ajout du chemin du dossier où a été compilée Darknet
 sys.path.insert(0, '/home/amusaal/darknetAB/python/')
 import darknet
 import cv2

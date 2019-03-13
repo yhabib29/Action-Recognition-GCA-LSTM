@@ -260,9 +260,15 @@ def gen_cornell_example(dataDir, dataType, split=None):
                 joints_list.append(joints)
                 trackingstates.append(tst)
                 bodies.append(b)
-            # Features
+            # If nobody, add zero coordinates
             if len(bodies) < 1:
                 bodies = [-1]
+                joints = 25 * [[0.0, 0.0, 0.0]]
+                joints_list.append(joints)
+            elif len(bodies) > 1:
+                warning('Multiple bodies in the same frame in {}'.format(folder))
+                bodies = bodies[0]
+            # Features
             joints_list = np.array(joints_list, dtype=np.float32).flatten()
             trackingstates = np.array(trackingstates, dtype=np.int64).flatten()
             bodies = np.array(bodies, dtype=np.int64).flatten()
