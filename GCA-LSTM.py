@@ -20,7 +20,7 @@ CHANNELS = 3
 BATCH_SIZE = 1
 LEARNING_RATE = 0.0015
 # Number of training iterations (1 iteration = 1 batch of sequences)
-ITERS = 10000
+ITERS = 5000
 # Number Attention iterations
 GCA_ITERS = 2
 # ST-LSTM layers dimensions
@@ -30,7 +30,12 @@ JOINTS = 16
 # Joints indexing correspondence table
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 # Training Mode (WINDOW or SEQUENCE or BATCH)
-BACKPROP = 'WINDOW'
+BACKPROP = 'SEQUENCE'
+# Window size (FIXED=fixed size, VARIABLE= variable size)
+WINDOW = 'FIXED'
+# Window parameter for fixed sized windows
+WINDOW_SIZE = 15
+WINDOW_STEP = 5
 
 
 # ------------------------
@@ -462,6 +467,7 @@ def train(log_file_):
                                        usePrevGCA, pl_previousGCA, GCA_ITERS, do_norm=True)
 
     # Loss
+    # TODO: Add Training on Batch of sequences by loading batches of sequences and adding padding
     # TODO: Train loss on the whole sequence
     # loss = stlstm_loss(outputs, ground_truth, NB_CLASSES)
     # loss_list = [stlstm_loss(out, ground_truth, NB_CLASSES) for out in reversed(outputs)]  # From last to first
@@ -565,8 +571,11 @@ def train(log_file_):
         accuracy, count = 0.0, 0
         # Initialize previous GCA
         prevGCA = np.zeros((1,NUM_UNITS[0]))
-        # Generate order (variable sequence length)
-        order = gen_order(ac)
+        # Generate order (=windows)
+        if WINDOW == 'VARIABLE':
+            order = gen_order(ac)
+        elif WINDOW == 'FIXED':
+            order = gen_windows(ac)
         # Select all frames sequences label per label
         for start, end in order:
 
@@ -731,13 +740,6 @@ def test(log_file_):
             # Convert joints
             jts = convertJoints(jts)
 
-            # TODO: Remove this block
-            # try:
-            #     jts = parse_data(jts, bds)
-            # except ValueError:
-            #     warning("Issue while parsing {}".format(fname))
-            #     continue
-
             line = "Iter {}: {} [{},{}] - {}".format(it, fname, w, h, jts.shape)
             log += line + "\n"
             print(line)
@@ -752,8 +754,11 @@ def test(log_file_):
             # Loop vars
             # start, end = 0, 1  # size of window
             accuracy, count = 0.0, 0
-            # Generate order (variable sequence length)
-            order = gen_order(ac)
+            # Generate order (=windows)
+            if WINDOW == 'VARIABLE':
+                order = gen_order(ac)
+            elif WINDOW == 'FIXED':
+                order = gen_windows(ac)
             # Select all frames sequences label per label
             for start,end in order:
 
