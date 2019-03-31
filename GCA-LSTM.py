@@ -19,12 +19,18 @@ CHANNELS = 3
 # Or need to use padding and post-processing to use batch
 BATCH_SIZE = 1
 LEARNING_RATE = 0.0015
+# Number of training iterations (1 iteration = 1 batch of sequences)
 ITERS = 10000
+# Number Attention iterations
+GCA_ITERS = 2
+# ST-LSTM layers dimensions
 NUM_UNITS = [128,128]
 # Number of joints used by the network
 JOINTS = 16
 # Joints indexing correspondence table
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
+# Training Mode (WINDOW or SEQUENCE or BATCH)
+BACKPROP = 'WINDOW'
 
 
 # ------------------------
@@ -306,23 +312,33 @@ def gen_order(gnd_classes):
         start = g
     if gnd_classes[start] != -1:
         order_.append([start,len(gnd_classes)])
-    # TODO: Remove this block
-    # for k in range(1, len(gnd_classes)):
-    #     # Move start to get only data with label
-    #     if gnd_classes[k-1] == -1:
-    #         start = k
-    #         continue
-    #     # Last frame
-    #     if k + 1 == len(gnd_classes) and gnd_classes[k] != -1:
-    #         end = k + 1
-    #         order_.append([start, end])
-    #     # If next frame is the same action
-    #     elif gnd_classes[k] == gnd_classes[k - 1]:
-    #         continue
-    #     elif gnd_classes[k] != gnd_classes[k - 1]:
-    #         end = k
-    #         order_.append([start, end])
-    #         start = k
+    return order_
+
+
+def gen_windows(gnd_classes):
+    """
+    TODO: Define the function
+    Generate list of intervals to split the original sequence into variable length sequence with the same action.
+    :param gnd_classes:     Ground Truth classes
+    :return:                List of intervals
+    """
+    global WINDOW_SIZE, WINDOW_STEP
+    order_ = []
+    start = 0
+    end = 0
+    # Select all frames sequences with a fix sized window
+    while end < len(gnd_classes):
+        # If the window exceed the sequence
+        if start + WINDOW_SIZE >= len(gnd_classes):
+            excess = start + WINDOW_SIZE - len(gnd_classes)
+            start = start - excess
+            end = len(gnd_classes)
+        else:
+            end = start + WINDOW_SIZE
+        win = gnd_classes[start:end]
+        if win[-1] != -1:
+            order_.append([start, start + WINDOW_SIZE])
+        start += WINDOW_STEP
     return order_
 
 
@@ -424,64 +440,6 @@ def convertJoints(joints_array):
     return new_joints_array
 
 
-def parse_data(joints_data, bodies_data):
-    """
-    TODO: Remove this function because the array structure has been fixed in conversation script
-    Parse raw data loaded from TFRecord and extract structured joints lists.
-    Each frame may contain multiple bodies. We have a list containing all the joints
-    coordinates of the sequence. For each frame, we also have a list of bodies ID present in the image. If there is
-    nobody, the list is [-1].
-    :param joints_data:
-    :param bodies_data:
-    :return: joints_list    np.array of shape (body,frame,joint,3)
-    """
-    joints_dict = {}
-    # joints_list = []
-    # tstates_list = []
-    b, fr = 0, 0
-    while b < len(bodies_data):
-        # Nobody in the image
-        if bodies_data[b] == -1:
-            fr += 1
-            b += 1
-            continue
-        # bd = []
-        # Initialize the frame bodies number
-        nbb = 0
-        # TODO: Double check if there are 6 or 7 bodies
-        # TODO: Check if there is one class per body per frame
-        for nb in range(6):
-            # Test if we will exceed the sequence bodies list
-            if b + nbb >= len(bodies_data):
-                nbb += 1
-                continue
-            if bodies_data[b + nbb] == nb:
-                # If it is the first time we see the body, we add zero coords for previous frames
-                if not nb in joints_dict.keys():
-                    joints_dict[nb] = fr * [[0,0,0]]
-                if len(joints_dict[nb]) != fr:
-                    joints_dict[nb] += (fr-len(joints_dict[nb])) * [[0,0,0]]
-                # jt = [joints_data[b + nbb][3 * jo:3 * jo + 3].tolist() for jo in range(25)]
-                jt = joints_data[fr][nbb*25:(nbb+1)*25].tolist()
-                jt = convertJoints(jt)
-                joints_dict[nb].append(jt)
-                # bd.append(b)
-                nbb += 1
-        fr += 1
-        b += nbb
-        # b += 1
-    nk = list(joints_dict.keys())
-    joints_list = np.zeros((len(nk), fr, JOINTS, 3))
-    for e,k in enumerate(nk):
-        # joints_list[e, :, :, :] = np.array(joints_dict[k])
-        try:
-            joints_list[e,:,:,:] = np.resize(np.array(joints_dict[k]), (fr,JOINTS,3))
-        except ValueError:
-            print(joints_dict[k])
-            sys.exit(-11)
-    return joints_list
-
-
 # ------------------------
 #          TRAIN
 # ------------------------
@@ -495,9 +453,13 @@ def train(log_file_):
     loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
     pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
     ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="ground_truth_placeholder")
+    pl_loss_means = tf.placeholder(shape=[None, GCA_ITERS], dtype=tf.float32, name='loss_means_placeholder')
+    pl_previousGCA = tf.placeholder(shape=[1, NUM_UNITS[0]], dtype=tf.float32, name='pl_previousGCA')
 
     # Create the graph of the network
-    outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True)  # do_norm=True
+    usePrevGCA = True
+    outputs, previousGCA = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES,
+                                       usePrevGCA, pl_previousGCA, GCA_ITERS, do_norm=True)
 
     # Loss
     # TODO: Train loss on the whole sequence
@@ -507,7 +469,11 @@ def train(log_file_):
 
     # Trainer - Backward propagation
     # train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
-    train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
+    if BACKPROP == 'SEQUENCE':
+        train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
+                   for lo in pl_loss_means]
+    else:
+        train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
                    for lo in loss_list]
 
     # Add the variable initializer Op.
@@ -527,7 +493,7 @@ def train(log_file_):
     sm_accuracy = tf.summary.scalar(name='Accuracy', tensor=pl_accuracy)
     # with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
     #     weights_summaries = [tf.summary.histogram(vname, tf.get_variable(vname[8:])) for vname in varnames]
-    merged_summary_op = tf.summary.merge_all()
+    # merged_summary_op = tf.summary.merge_all()
 
     # Saver to save weights
     saver = tf.train.Saver(max_to_keep=10)
@@ -554,9 +520,13 @@ def train(log_file_):
         # print('TStates:\t',tstates.shape)
 
         # Load scene
-        imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+        try:
+            imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+        except Exception:
+            print(imgs.shape, ac.shape, jts.shape, bds.shape, h, w, nbf, fname)
+            warning('Exception raised while reading data')
         # Pre-process
-        fname = fname.decode('UTF-8')
+        fname = fname if type(fname) == str else fname.decode('UTF-8')
         ac = np.array(ac) - 1
 
         if bds.shape[0] != jts.shape[0]:
@@ -565,15 +535,6 @@ def train(log_file_):
 
         # Convert joints
         jts = convertJoints(jts)
-
-        # TODO: Remove this block
-        # try:
-        #     jts = parse_data(jts, bds)
-        #     continue
-        # except ValueError:
-        #     warning("Issue while parsing {}".format(fname))
-        #     traceback.print_exc()
-        #     sys.exit(-10)
 
         # DEBUG - Parsing data
         # jts = np.array(parse_joints(jts, tStates, bds))
@@ -602,6 +563,8 @@ def train(log_file_):
         losses = []
         avg_loss = 0.0
         accuracy, count = 0.0, 0
+        # Initialize previous GCA
+        prevGCA = np.zeros((1,NUM_UNITS[0]))
         # Generate order (variable sequence length)
         order = gen_order(ac)
         # Select all frames sequences label per label
@@ -609,26 +572,26 @@ def train(log_file_):
 
             # Window - subset of data
             indata = jts[:, start:end, :, :]
-            print(start,end,indata.shape)
             # Ground Truth label
             gnd = ac[end-1]
             gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
+            log += 'DEBUG - gt={}'.format(gt)
             # out = sess.run(outputs, feed_dict={inputs: indata})
             # print(out)
 
             # Train
-            try:
-                results, lo, _, sm_lo = sess.run([outputs, loss_list, train_steps, sm_loss],
-                                             feed_dict={inputs: indata, ground_truth: gt})
-            except tf.python.framework.errors_impl.InvalidArgumentError:
-                print(gnd, gt, end, ac[end - 1:end + 1])
-                sys.exit(-1)
+            if BACKPROP == 'SEQUENCE':
+                results, prevGCA, lo, sm_lo = sess.run([outputs, previousGCA, loss_list, sm_loss],
+                                              feed_dict={inputs: indata, ground_truth: gt, pl_previousGCA: prevGCA})
+            else:
+                results, prevGCA, lo, _, sm_lo = sess.run([outputs, previousGCA, loss_list, train_steps, sm_loss],
+                                                 feed_dict={inputs: indata, ground_truth: gt, pl_previousGCA: prevGCA})
             # results, lo, _, sm_lo, sm_weights = sess.run([outputs, loss_list, train_steps,
             #                                               sm_loss, weights_summaries],
             #                                              feed_dict={inputs: indata, ground_truth: gt})
 
             # Get loss and predictions
-            losses.append(lo[-1])
+            losses.append(lo)
             predicted_class = classnames[results[-1].argmax()]
             gtruth_class = classnames[class_ids.index(gnd)]
             # Print predictions and save to log
@@ -652,23 +615,28 @@ def train(log_file_):
         total_accuracy += accuracy
         total_count += count
         accuracy = accuracy / count
-        avg_loss = np.array(losses).mean()
+        avg_loss = np.array(losses).mean(axis=0)
+        # avg_loss = np.array(losses).mean()
+
+        # MINIBATCH backpropagation
+        if BACKPROP == 'SEQUENCE':
+            _ = sess.run(train_steps, feed_dict={pl_loss_means:avg_loss})
 
         # Print Loss and Accuracy and save to log
-        line = "AVG Loss = {}\nAccuracy = {}\n".format(avg_loss, accuracy)
+        line = "AVG Loss = {}\nAccuracy = {}\n".format(avg_loss[-1], accuracy)
         print(line)
         with open(log_file_, 'a') as flog:
             flog.write(log + line + '\n')
 
         # Save weights, accuracy and loss values for tensorboard
         if i % 10 == 0:
-            # sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
-            # writer.add_summary(sm_acc, global_step=i)
-            # writer.add_summary(sm_lo, global_step=i)
+            sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
+            writer.add_summary(sm_acc, global_step=i)
+            writer.add_summary(sm_lo, global_step=i)
             # for sm_w in sm_weights:
             #     writer.add_summary(sm_w, global_step=i)
-            merged_summary = sess.run(merged_summary_op, feed_dict={pl_accuracy: accuracy})
-            writer.add_summary(merged_summary, global_step=i)
+            # merged_summary = sess.run(merged_summary_op, feed_dict={pl_accuracy: accuracy})
+            # writer.add_summary(merged_summary, global_step=i)
 
         # Save weights each 1000 iterations
         if i % 1000 == 0:
@@ -715,7 +683,7 @@ def test(log_file_):
 
     # Define the graph
     # TODO: Add args to change ST-LSTM hyperparameters
-    outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True)  # do_norm=True
+    outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True, useDropout=True)
 
     # Create the session
     config = tf.ConfigProto()
@@ -725,7 +693,7 @@ def test(log_file_):
     # Summary - Tensorboard variables
     sm_accuracy = tf.summary.scalar(name='Total Accuracy', tensor=pl_accuracy)
     writer = tf.summary.FileWriter('./log_gca_test', sess.graph)
-    merged_summary_op = tf.summary.merge_all()
+    # merged_summary_op = tf.summary.merge_all()
 
     # Saver to restore weights
     saver = tf.train.Saver()
@@ -752,7 +720,8 @@ def test(log_file_):
             imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
 
             # Pre-process
-            fname = fname.decode('UTF-8')
+            # fname = fname.decode('UTF-8')
+            fname = fname if type(fname) == str else fname.decode('UTF-8')
             ac = np.array(ac) - 1
 
             if bds.shape[0] != jts.shape[0]:
@@ -840,10 +809,7 @@ def test(log_file_):
 
             # Save accuracy for tensorboard
             if it % 1 == 0:
-                # sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
-                merged_summary = sess.run(merged_summary_op,
-                                          feed_dict={pl_accuracy: total_accuracy / total_count})
-                writer.add_summary(merged_summary, global_step=it)
+                sm_acc = sess.run(sm_accuracy, feed_dict={pl_accuracy:accuracy})
 
             if it % 10 == 0:
                 precision_ = stats[:, 0] / (stats[:, 0] + stats[:, 2])

@@ -48,7 +48,9 @@ def get_help():
     mhelp += gbold + "--dataDir [-d]\tPATH\t\t" + green
     mhelp += "Path to the directory of the dataset\n"
     mhelp += gbold + "--dataType [-t]\tNAME\t\t" + green
-    mhelp += "Name of the folder containing data. It will be used as the output prefix.\n\n"
+    mhelp += "Name of the folder containing data. It will be used as the output prefix."
+    mhelp += gbold + "--overwrite [-o]\t\t\t" + green
+    mhelp += "Overwrite output files if they already exist.\n\n"
     mhelp += gbold + "Example:\n" + green
     mhelp += "python3 convert_Dataset_to_TFRecord.py --dataDir {} --dataType {}\n".format(dpath_1, dtype_1)
     mhelp += "python3 convert_Dataset_to_TFRecord.py -d {} -t {}\n\n".format(dpath_2, dtype_2)
@@ -57,15 +59,17 @@ def get_help():
 
 
 def parser():
-    global dataDir, dataType
+    global dataDir, dataType, overwrite
     argv = sys.argv
     argc = len(argv)
     help_ = get_help()
     for a, arg in enumerate(argv):
-        if a == argc-1:
-            if arg in ['--help', '-h']:
-                print(help_)
-                sys.exit()
+        if arg in ['--overwrite', '-o']:
+            overwrite = True
+        elif  arg in ['--help', '-h']:
+            print(help_)
+            sys.exit()
+        elif a == argc-1:
             break
         elif arg in ['--help', '-h']:
             print(help_)
@@ -148,9 +152,11 @@ def gen_feature2(ft_image, joints, tstates, aclass, bodies_id):
 
 # Generate Example for Coco Dataset
 def gen_coco_example(dataDir, dataType):
+    global overwrite
     # Open TFRecords file
     filename = '{}/{}_coco.tfrecords'.format(dataDir, dataType)
-    check_filename(filename)
+    if not overwrite:
+        check_filename(filename)
     writer = tf.python_io.TFRecordWriter(filename)
     # Annotations
     annFile = '{}/annotations/instances_{}.json'.format(dataDir, dataType)
@@ -211,30 +217,41 @@ def gen_coco_example(dataDir, dataType):
 
 # Generate Example for Cornell Dataset
 def gen_cornell_example(dataDir, dataType, split=None):
+    global overwrite
     # Open TFRecords file
     filename = '{}/{}_{}.tfrecords'.format(dataDir, dataType, split[:split.index('_')])
-    check_filename(filename)
+    if not overwrite:
+        check_filename(filename)
     writer = tf.python_io.TFRecordWriter(filename)
 
     path = "{}/{}/".format(dataDir, dataType)
     folders = os.listdir(path)
+    # Get list of files if we split into train/test datasets
     if split != None:
         msplit = loadmat("{}/{}_split.mat".format(dataDir, dataType))
         folders = [sp[0] for sp in msplit[split][0]]
 
+    # Go through sequences folders
     for fid, folder in enumerate(folders):
+        # Print progression
         print('[{}/{}]'.format(str(fid+1), str(len(folders))), end='\r')
         sys.stdout.flush()
+
+        # Check if we are in a correct sequence folder
         if not os.path.isdir(path + folder + '/rgbjpg'):
             error('No "rgbjpg" folder in ' + path + folder)
+        if not os.path.isdir(path + folder + '/depth'):
+            error('No "depth" folder in ' + path + folder)
 
         # Load annotations
         body_mat = loadmat(path + folder + '/body.mat')
         nb_frames, nb_body = body_mat['body'].shape
         height, width, channels = None, None, None
-        # ft_list = []
+        # dheight, dwidth = None, None
         classes = load_classes(dataDir, dataType, folder)
+
         feature_images = []
+        # scene_depths = []
         scene_joints = []
         scene_trackingstates = []
         scene_bodies = []
@@ -242,14 +259,25 @@ def gen_cornell_example(dataDir, dataType, split=None):
             trackingstates = []
             joints_list = []
             bodies = []
+
             # Load image
-            img_fpath = path + folder + '/rgbjpg/' + str(f + 1).zfill(4) + '.jpg'
+            img_fpath = '{}{}/rgbjpg/{:04d}.jpg'.format(path, folder, f+1)
+            # img_fpath = path + folder + '/rgbjpg/' + str(f + 1).zfill(4) + '.jpg'
             if not os.path.isfile(img_fpath):
                 error('No such file: ' + img_fpath)
                 continue
             imshape, image = load_image(img_fpath)
             if None in [height, width, channels]:
                 height, width, channels = imshape
+
+            # Load depth
+            # depth_fpath = '{}{}/depth/{:04d}.mat'.format(path, folder, f + 1)
+            # if not os.path.isfile(depth_fpath):
+            #     error('No such file: ' + depth_fpath)
+            #     continue
+            # depth = loadmat(depth_fpath)['depth']
+            # if None in [dheight, dwidth]:
+            #     dheight, dwidth = depth.shape
 
             # Load joints coordinates
             for b in range(nb_body):
@@ -265,9 +293,11 @@ def gen_cornell_example(dataDir, dataType, split=None):
                 bodies = [-1]
                 joints = 25 * [[0.0, 0.0, 0.0]]
                 joints_list.append(joints)
+            # If multiple bodies, keep the first one
             elif len(bodies) > 1:
                 warning('Multiple bodies in the same frame in {}'.format(folder))
                 bodies = bodies[0]
+
             # Features
             joints_list = np.array(joints_list, dtype=np.float32).flatten()
             trackingstates = np.array(trackingstates, dtype=np.int64).flatten()
@@ -275,6 +305,7 @@ def gen_cornell_example(dataDir, dataType, split=None):
             bytes_image = tf.compat.as_bytes(image)
             feature_image = bytes_feature(bytes_image)
             feature_images.append(feature_image)
+            # scene_depths.append(depth.flatten())
             scene_joints.append(joints_list)
             scene_trackingstates.append(trackingstates)
             scene_bodies.append(bodies)
@@ -287,19 +318,23 @@ def gen_cornell_example(dataDir, dataType, split=None):
             'name': bytes_feature(folder.encode('utf-8')),
             'nb_frames': int64_feature(nb_frames),
             'height': int64_feature(height),
-            'width': int64_feature(width)
+            'width': int64_feature(width),
+            # 'dheight': int64_feature(dheight),
+            # 'dwidth': int64_feature(dwidth)
         })
         # Feature lists
         fl_classes = tf.train.FeatureList(feature=[int64_feature(c) for c in classes])
         fl_tstates = tf.train.FeatureList(feature=[int64_feature_list(ts) for ts in scene_trackingstates])
         fl_bodies = tf.train.FeatureList(feature=[int64_feature_list(b) for b in scene_bodies])
         fl_images = tf.train.FeatureList(feature=feature_images)
+        # fl_depths = tf.train.FeatureList(feature=[int64_feature_list(dp) for dp in scene_depths])
         fl_joints = tf.train.FeatureList(feature=[float_feature_list(j) for j in scene_joints])
         feature_list = tf.train.FeatureLists(feature_list={
             'classes': fl_classes,
             'trackingStates': fl_tstates,
             'bodies': fl_bodies,
             'images': fl_images,
+            # 'depths': fl_depths,
             'joints': fl_joints
         })
         ex = tf.train.SequenceExample(context=context, feature_lists=feature_list)
@@ -315,6 +350,7 @@ def gen_cornell_example(dataDir, dataType, split=None):
 # anchors = [[0.57273, 0.677385], [1.87446, 2.06253], [3.33843, 5.47434], [7.88282, 3.52778], [9.77052, 9.16828]]
 dataDir = '/home/amusaal/DATA/Coco'
 dataType = 'val2014'
+overwrite = False
 parser()
 
 if "Coco" in dataDir:

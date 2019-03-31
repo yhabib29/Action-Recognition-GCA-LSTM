@@ -67,7 +67,7 @@ class STLSTMCell(LayerRNNCell):
     """
 
     def __init__(self, num_units, initializer=None, input_shape=None,
-                 forget_bias=1.0, trainable=True, do_norm=False,
+                 forget_bias=1.0, trainable=True, do_norm=False, useDropout=False,
                  activation=None, reuse=None, name=None, dtype=None, **kwargs):
         """Initialize the parameters for an LSTM cell.
         Args:
@@ -103,6 +103,7 @@ class STLSTMCell(LayerRNNCell):
         # Inputs must be 2-dimensional.
         self.input_spec = base_layer.InputSpec(ndim=2)
         self.do_norm = do_norm
+        self.useDropout = useDropout
         self._num_units = num_units
         self._forget_bias = forget_bias
         # self._initializer = initializers.get(initializer)
@@ -173,6 +174,10 @@ class STLSTMCell(LayerRNNCell):
         """
         with tf.variable_scope(scope or type(self).__name__):
             (cs_prev, ct_prev, hs_prev, ht_prev) = state
+
+            # Dropout
+            if self.useDropout:
+                inputs = tf.nn.dropout(inputs, ratio=0.33)
 
             # i = input_gate, fs = forget_gate_S, ft = forget_gate_T, o = output_gate, j = new_input
             lstm_matrix = math_ops.matmul(array_ops.concat([inputs, hs_prev, ht_prev], 1),
@@ -287,14 +292,17 @@ class GCACell():  # LayerRNNCell
             e = math_ops.mat_mul(self._activation(e), self.We1, transpose_b=True)
             return e
 
-    def update_context(self, last_output):
+    def update_context(self, last_output, useDropout_=False):
         ctx = math_ops.mat_mul(array_ops.concat([last_output, self.prevcontext], 1),
                                self._kernel, transpose_b=True)
         self.context = tf.nn.relu(ctx)
+        if useDropout_:
+            self.context = tf.nn.dropout(self.context, rate=0.5)
         return self.context
 
 
-def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
+def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA=None,
+                iters=2, do_norm=False, useDropout=False):
     """https://github.com/philipperemy/tensorflow-multi-dimensional-lstm/blob/master/md_lstm.py
     Implements multi dimension LSTM
     @param lstm_size: the hidden units
@@ -412,7 +420,7 @@ def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
             prevstate_S2 = tf.cond(tf.less(zero, tf.mod(id_, OUT_DIM1)),
                                    lambda: states_ta2_.read(get_prevS(id_)),  # get previous joint state id (j-1)
                                    lambda: states_ta2_.read(
-                                       T_dim * OUT_DIM1))  # first joint - get zero state !TODO: use the good joint
+                                       T_dim * OUT_DIM1))  # first joint - get zero state !
             # Process cureent state and then the new state
             current_state2 = prevstate_S2[0], prevstate_T2[0], prevstate_S2[1], prevstate_T2[1]
             out2, state2 = cell2(outputs_ta.read(id_), current_state2, r)
@@ -466,8 +474,13 @@ def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
             #                                          parallel_iterations=1)
 
             # Initialize context 0
-            if it == 1:
-                gca_cells[0].set_prevcontext(init_context(outputs_ta))
+            if it ==1:
+                if usePrevGCA:
+                    initial_context = tf.cond(tf.less(tf.constant(0,dtype=tf.int64), tf.count_nonzero(previousGCA)),
+                                              lambda: previousGCA, lambda: init_context(outputs_ta))
+                    gca_cells[0].set_prevcontext(initial_context)
+                else:
+                    gca_cells[0].set_prevcontext(init_context(outputs_ta))
 
             # Process e
             index = tf.constant(0)
@@ -482,7 +495,7 @@ def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
                                                           parallel_iterations=1)
 
             # Update context
-            ctx = gca_cells[it - 1].update_context(outputs_ta2.read(S_dim * T_dim - 1))
+            ctx = gca_cells[it - 1].update_context(outputs_ta2.read(S_dim * T_dim - 1), useDropout)
             # it += 1
             if it < iters:
                 gca_cells[it].prevcontext = ctx
@@ -506,8 +519,11 @@ def stlstm_loop(lstm_size, input_data, nb_classes, iters=2, do_norm=False):
         # Reorder te dimensions to match the input
         # y = tf.transpose(y, [2, 0, 1, 3])
 
+        # Global Context
+        gca = gca_cells[-1].context
+
         # Return the output and the inner states
-        return results
+        return results, gca
 
 
 def stlstm_loss(prediction, ground_truth, nb_classes):

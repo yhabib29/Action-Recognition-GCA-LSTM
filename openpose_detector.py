@@ -1,6 +1,7 @@
 import sys
 import cv2
 import os
+from time import time
 ODIR = '/home/amusaal/Yassine/openpose'
 sys.path.append(ODIR + '/build/python/openpose/')
 
@@ -32,14 +33,24 @@ openpose = OpenPose(params)
 i=0
 while i < 1:
     # Read new image
-    img = cv2.imread(ODIR + "/examples/media/COCO_val2014_000000000192.jpg")
+    # img = cv2.imread(ODIR + "/examples/media/COCO_val2014_000000000192.jpg")
+    img = cv2.imread('../DATA/Cornell/kitchen/data_02-05-47/rgbjpg/0017.jpg')
+
     # Output keypoints and the image with the human skeleton blended on it
+    t_start = time()
     keypoints, output_image = openpose.forward(img, True)
+    t_end = time()
+
     # Print the human pose keypoints, i.e., a [#people x #keypoints x 3]-dimensional numpy object with the keypoints of all the people on that image
     print(keypoints)
+
     # Display the image
     # cv2.imshow("output", output_image)
     # cv2.waitKey(15)
+
     # Save th eimage
-    cv2.imwrite("output.jpg", output_image)
+    cv2.imwrite("test/openpose_output.jpg", output_image)
     i += 1
+
+    # Time
+    print('Time: {} s'.format(t_end - t_start))
