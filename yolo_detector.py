@@ -74,7 +74,7 @@ if MODE == 'MEASURE':
         _ = darknet.performDetect()
         t_end = time()
         T.append(t_end - t_start)
-    print('{} s'.format(np.array(T).mean()))
+    print('Inference time: {} s'.format(np.array(T).mean()))
     sys.exit(0)
 
 if MODE == 'TEST':
