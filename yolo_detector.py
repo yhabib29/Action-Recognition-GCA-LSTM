@@ -61,20 +61,21 @@ makeImageOnly = False
 initOnly= False
 # img = cv2.imread(imagePath)
 thresh = 0.25
-MODE = 'TEST'   # or 'WRITE
+MODE = 'TEST'   # or 'WRITE / 'MEASURE'
 
 # Initialize network
 if MODE != 'READ':
     darknet.performDetect(initOnly=True)
 
-T = []
-for i in range(50):
-    t_start = time()
-    _ = darknet.performDetect()
-    t_end = time()
-    T.append(t_end - t_start)
-print('{} s'.format(np.array(T).mean()))
-sys.exit(0)
+if MODE == 'MEASURE': 
+    T = []
+    for i in range(50):
+        t_start = time()
+        _ = darknet.performDetect()
+        t_end = time()
+        T.append(t_end - t_start)
+    print('{} s'.format(np.array(T).mean()))
+    sys.exit(0)
 
 if MODE == 'TEST':
     # Load image
