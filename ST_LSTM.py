@@ -338,22 +338,22 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
                            do_norm=do_norm)
         # Create the GCA cells (one per iteration)
         # gca_cells = [GCACell(lstm_size, ite) for ite in range(1, iters + 1)]
-        gca_cells = [[GCACell(lstm_size, ite) for ite in range(1, iters + 1)] for b_ in batch_size]
+        gca_cells = [[GCACell(lstm_size, ite) for ite in range(1, iters + 1)] for _ in batch_size]
 
         # The batch size is inferred from the tensor size
         x = tf.reshape(input_data, [batch_size, T_dim, S_dim, channels])
 
-        # Reorder inputs to (t, s, batch_size, features) - t=T_dim, s=S_dim
-        x = tf.transpose(x, [1, 2, 0, 3])
+        # Reorder inputs - t=T_dim, s=S_dim
+        # x = tf.transpose(x, [1, 2, 0, 3])   #(t, s, batch_size, features)
         # Reshape to a one dimensional tensor of (t*s*batch_size , features)
-        x = tf.reshape(x, [-1, batch_size, channels])
+        x = tf.reshape(x, [-1, channels])
         # Split tensor into t*s tensors of size (batch_size , features)
         # x = tf.split(axis=0, num_or_size_splits=T_dim*S_dim, value=x)
 
         # Create an input tensor array (literally an array of tensors) to use inside the loop
         # inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array', dynamic_size=True,
         #                            infer_shape=False)
-        inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array',
+        inputs_ta = tf.TensorArray(dtype=tf.float32, size=batch_size * T_dim * S_dim, name='input_array',
                                    dynamic_size=True, infer_shape=False)
         inputs_ta = inputs_ta.unstack(x)
 
@@ -448,9 +448,9 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
             return tf.less(id_, T_dim * S_dim)
 
         # Init ST-LSTM1 states and output arrays
-        states_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * OUT_DIM1 + 1, name='state_array_1',
+        states_ta = tf.TensorArray(dtype=tf.float32, size=batch_size * T_dim * OUT_DIM1 + 1, name='state_array_1',
                                    clear_after_read=False)
-        outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * OUT_DIM1, name='output_array_1',
+        outputs_ta = tf.TensorArray(dtype=tf.float32, size=batch_size * T_dim * OUT_DIM1, name='output_array_1',
                                     clear_after_read=False)
         # initial cell hidden states: last position of the array = LSTMStateTuple filled with zeros
         states_ta = states_ta.write(T_dim * OUT_DIM1,
@@ -461,6 +461,8 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
         index = tf.constant(0)
         _, outputs_ta, states_ta = tf.while_loop(condition1, body1, [index, outputs_ta, states_ta],
                                                  parallel_iterations=1)
+
+        # TODO: Handle batch
         for it in range(1, iters + 1):
             states_ta2 = tf.TensorArray(dtype=tf.float32, size=T_dim * OUT_DIM1 + 1, name='state_array2',
                                         clear_after_read=False)
