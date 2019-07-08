@@ -312,6 +312,16 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
     """
 
     with tf.variable_scope("ST-LSTM", reuse=tf.AUTO_REUSE):
+        # Get the shape of the input (batch_size, x, y, channels)
+        # shape = input_data.get_shape().as_list()
+        shape = tf.shape(input_data)
+        batch_size = shape[0]
+        T_dim = shape[1]
+        S_dim = shape[2]
+        channels = shape[3]
+        # Get the number of features (total number of input values per step)
+        # features = S_dim * channels
+
         # Results list
         results = []
         # Create ST-LTSM cells
@@ -327,17 +337,8 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
                            name="layer2",
                            do_norm=do_norm)
         # Create the GCA cells (one per iteration)
-        gca_cells = [GCACell(lstm_size, ite) for ite in range(1, iters + 1)]
-
-        # Get the shape of the input (batch_size, x, y, channels)
-        # shape = input_data.get_shape().as_list()
-        shape = tf.shape(input_data)
-        batch_size = shape[0]
-        T_dim = shape[1]
-        S_dim = shape[2]
-        channels = shape[3]
-        # Get the number of features (total number of input values per step)
-        # features = S_dim * channels
+        # gca_cells = [GCACell(lstm_size, ite) for ite in range(1, iters + 1)]
+        gca_cells = [[GCACell(lstm_size, ite) for ite in range(1, iters + 1)] for b_ in batch_size]
 
         # The batch size is inferred from the tensor size
         x = tf.reshape(input_data, [batch_size, T_dim, S_dim, channels])
@@ -350,8 +351,10 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
         # x = tf.split(axis=0, num_or_size_splits=T_dim*S_dim, value=x)
 
         # Create an input tensor array (literally an array of tensors) to use inside the loop
-        inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array', dynamic_size=True,
-                                   infer_shape=False)
+        # inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array', dynamic_size=True,
+        #                            infer_shape=False)
+        inputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * S_dim, name='input_array',
+                                   dynamic_size=True, infer_shape=False)
         inputs_ta = inputs_ta.unstack(x)
 
         # Create a TensorArray for the order of the joints
@@ -370,10 +373,13 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
             return t_ - w_
 
         def init_context(output_layer1):
-            return tf.reduce_mean(output_layer1.stack(), axis=0)
+            return tf.reduce_mean(output_layer1, axis=0)
 
         def process_information(id_, e_ta_):
-            gca_ = gca_cells[it - 1]
+            # TODO: Calculer la mesure d'information pour chaque GCA du batch
+            # e_ta_data = np.arra
+            # for b in batch_size_:
+            gca_ = gca_cells[b][it - 1]
             e_ta_ = e_ta_.write(id_, gca_(outputs_ta.read(id_)))
             return id_ + 1, e_ta_
 
@@ -393,7 +399,7 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
             # If it is the first step we read the zero state if not we read the inmediate last
             prevstate_S = tf.cond(tf.less(zero, tf.mod(id_, OUT_DIM1)),
                                   lambda: states_ta_.read(get_prevS(id_)), # get previous joint state id (j-1) from JOINT ORDER
-                                  lambda: states_ta_.read(T_dim * OUT_DIM1))  # first joint - get zero state
+                                  lambda: states_ta_.read(T_dim * OUT_DIM1))  # first joint, get zero state
 
             # We build the input state in both dimensions
             current_state = prevstate_S[0], prevstate_T[0], prevstate_S[1], prevstate_T[1]
@@ -447,8 +453,9 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
         outputs_ta = tf.TensorArray(dtype=tf.float32, size=T_dim * OUT_DIM1, name='output_array_1',
                                     clear_after_read=False)
         # initial cell hidden states: last position of the array = LSTMStateTuple filled with zeros
-        states_ta = states_ta.write(T_dim * OUT_DIM1, LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
-                                                                     tf.zeros([batch_size, lstm_size[0]], tf.float32)))
+        states_ta = states_ta.write(T_dim * OUT_DIM1,
+                                    LSTMStateTuple(tf.zeros([batch_size, lstm_size[0]], tf.float32),
+                                                   tf.zeros([batch_size, lstm_size[0]], tf.float32)))
 
         # Loop 1: First ST-LSTM layer
         index = tf.constant(0)
@@ -475,14 +482,18 @@ def stlstm_loop(lstm_size, input_data, nb_classes, usePrevGCA=False, previousGCA
 
             # Initialize context 0
             if it ==1:
-                if usePrevGCA:
-                    initial_context = tf.cond(tf.less(tf.constant(0,dtype=tf.int64), tf.count_nonzero(previousGCA)),
-                                              lambda: previousGCA, lambda: init_context(outputs_ta))
-                    gca_cells[0].set_prevcontext(initial_context)
-                else:
-                    gca_cells[0].set_prevcontext(init_context(outputs_ta))
+                for b in batch_size:
+                    if usePrevGCA:
+                        initial_context = tf.cond(tf.less(tf.constant(0,dtype=tf.int64),
+                                                          tf.count_nonzero(previousGCA[b])),
+                                                  lambda: previousGCA[b],
+                                                  lambda: init_context(outputs_ta.stack()[:,b,:]))
+                        gca_cells[0].set_prevcontext(initial_context)
+                    else:
+                        gca_cells[0].set_prevcontext(init_context(outputs_ta.stack()[:,b,:]))
 
             # Process e
+            # TODO: Handle batch of data
             index = tf.constant(0)
             _, e_ta = tf.while_loop(condition, process_information, [index, e_ta],
                                     parallel_iterations=1)

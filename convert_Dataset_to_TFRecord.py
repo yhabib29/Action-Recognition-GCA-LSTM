@@ -8,6 +8,10 @@ from pycocotools.coco import COCO
 
 
 def warning(msg):
+    """
+    Print warning message.
+    :param msg:     Warning message to print
+    """
     orange = '\033[33m'
     end = '\033[0m'
     print(orange + msg + end)
@@ -15,6 +19,10 @@ def warning(msg):
 
 
 def error(msg):
+    """
+    Print error message and exit program.
+    :param msg:     Error message.
+    """
     red = '\033[31m'
     end = '\033[0m'
     print(red + msg + end)
@@ -23,6 +31,10 @@ def error(msg):
 
 
 def check_filename(fname):
+    """
+    Check if output filename already exist and ask user if he/she wants to overwrite it.
+    :param fname:   Filename (File path)
+    """
     # TFRecord output filename
     if os.path.isfile(fname):
         choice = input('file {} already exist, overwrite ? [y/n] '.format(fname))
@@ -32,6 +44,10 @@ def check_filename(fname):
 
 
 def get_help():
+    """
+    Return help message to print including all options of the program.
+    :return:    Help message
+    """
     gbold = '\033[1;32m'
     green = '\033[0;32m'
     dpath_1 = '../home/amusaal/DATA/Coco'
@@ -59,6 +75,9 @@ def get_help():
 
 
 def parser():
+    """
+    Parse program arguments.
+    """
     global dataDir, dataType, overwrite
     argv = sys.argv
     argc = len(argv)
@@ -91,6 +110,11 @@ def parser():
 
 
 def load_image(filename):
+    """
+    Load image and return its binary data and its shape.
+    :param filename:    Image filename (file path).
+    :return:            Image shape and Compressed image binary data.
+    """
     img = cv2.imread(filename)
     s = img.shape
     # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

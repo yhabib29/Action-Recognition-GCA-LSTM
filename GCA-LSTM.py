@@ -8,6 +8,9 @@ from datetime import datetime
 # import cv2
 import traceback
 
+# Path to darknet Python library
+# sys.path.insert(0, '/home/amusaal/darknetAB/python/')
+# import darknet
 
 # ------------------------
 #   HYPERPARAMETERS
@@ -17,10 +20,10 @@ import traceback
 CHANNELS = 3
 # Batch size be 1 for now, because dataset sequences have different length.
 # Or need to use padding and post-processing to use batch
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 LEARNING_RATE = 0.0015
 # Number of training iterations (1 iteration = 1 batch of sequences)
-ITERS = 5000
+ITERS = 1#5000
 # Number Attention iterations
 GCA_ITERS = 2
 # ST-LSTM layers dimensions
@@ -30,12 +33,12 @@ JOINTS = 16
 # Joints indexing correspondence table
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 # Training Mode (WINDOW or SEQUENCE or BATCH)
-BACKPROP = 'SEQUENCE'
+BACKPROP = 'WINDOW'
 # Window size (FIXED=fixed size, VARIABLE= variable size)
 WINDOW = 'FIXED'
 # Window parameter for fixed sized windows
-WINDOW_SIZE = 15
-WINDOW_STEP = 5
+WINDOW_SIZE = 20
+WINDOW_STEP = 20 #5
 
 
 # ------------------------
@@ -157,9 +160,12 @@ def read_class(class_file_):
     nb_classes = 0
     with open(class_file_, 'r') as f:
         for l in f.readlines():
+            if len(l) < 1:
+                continue
             lim = l.index(' ')
             cid = l[:lim]
-            cname = l[lim + 1:-1]
+            cname = l[lim + 1:]
+            cname = cname.replace('\n', '')
             if not cid.isdigit():
                 error('Invalid Class Index {} in {}'.format(cid, class_file_))
             if len(cname) < 1:
@@ -194,7 +200,7 @@ def parse_args():
     Parse program arguments
     """
     global ITERS, NB_CLASSES, NUM_UNITS, LEARNING_RATE
-    global mode, dataset, dataset_name, class_ids, classnames, weights_file
+    global mode, dataset, dataset_name, class_ids, classnames, weights_file, objects_class_ids, objects_classnames
     help_ = get_help()
     argv = sys.argv
     argc = len(argv)
@@ -249,6 +255,9 @@ def parse_args():
             NUM_UNITS = read_dims(argv[a+1])
         else:
             continue
+
+    # Get objects classes
+    # [_, objects_class_ids, objects_classnames] = read_class('{}_objects.class'.format(dataset_name))
 
     # Confirm Dataset path
     if not dataset:
@@ -393,17 +402,23 @@ def _parse_(serialized_example):
     # bodies = tf.sparse.to_dense(features['bodies'], default_value=-1)
     bodies = tf.cast(features['bodies'], tf.int32)
     aclasses = tf.cast(features['classes'], tf.int32)
-    framename = tf.cast(ctx['name'], tf.string)
+    sequence_name = tf.cast(ctx['name'], tf.string)
     height = tf.cast(ctx['height'], tf.int32)
     width = tf.cast(ctx['width'], tf.int32)
     nb_frames = tf.cast(ctx['nb_frames'], tf.int32)
 
     joints = tf.sparse.to_dense(features['joints'])
     trackingStates = tf.sparse.to_dense(features['trackingStates'])
+
+    # Reshape
+    images = tf.reshape(images, [nb_frames, height, width, 3])
+    aclasses = tf.reshape(aclasses, [nb_frames])
     joints = tf.reshape(joints, [nb_frames, 25, 3])
+    trackingStates = tf.reshape(trackingStates, [nb_frames, 25])
+    bodies = tf.reshape(bodies, [nb_frames])
 
     # return (image, joints, aclass, bodies, trackingStates)
-    return (images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, framename)
+    return (images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, sequence_name)
 
 
 def convertJoints(joints_array):
@@ -445,6 +460,26 @@ def convertJoints(joints_array):
     return new_joints_array
 
 
+# def detect_objects(images_):
+#     """
+#     Detect objects on images of the sequence and return their coordinates (2D/3D)
+#     :param images_:     Array of images
+#     :return:            Array of objects detection
+#     """
+#     global objects_classnames
+#     objects_ = len(images_) * [[]]
+#     for i_, im_ in enumerate(images_):
+#         detections = darknet.performDetect(imageData=im_)
+#         for dtc in detections:
+#             # TODO: How to handle multiple objects of the same class
+#             if dtc[0] in objects_classnames and dtc[1] > 0.4:
+#                 obj_pos = dtc[2][:2]    # BB center
+#                 # TODO: Get 3D coordinates from pixel coords using depth map
+#                 objects_[i_].append(obj_pos)
+#     return objects_
+
+
+
 # ------------------------
 #          TRAIN
 # ------------------------
@@ -454,12 +489,12 @@ def train(log_file_):
     global NUM_UNITS, NB_CLASSES, BATCH_SIZE, JOINTS, LEARNING_RATE, ITERS, weights_file
     # Define variables
     # inputs = tf.placeholder(tf.float32, (None, None, 3))  # (time, batch, features, channels) - (time,batch,in)
-    inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, batch, features, channels)
-    loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
+    inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # [batch, frames, joints, channels]
+    # loss = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.float32, name="loss_placeholder")
     pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
     ground_truth = tf.placeholder(shape=[BATCH_SIZE, 1], dtype=tf.int32, name="ground_truth_placeholder")
-    pl_loss_means = tf.placeholder(shape=[None, GCA_ITERS], dtype=tf.float32, name='loss_means_placeholder')
-    pl_previousGCA = tf.placeholder(shape=[1, NUM_UNITS[0]], dtype=tf.float32, name='pl_previousGCA')
+    # pl_loss_means = tf.placeholder(shape=[GCA_ITERS], dtype=tf.float32, name='loss_means_placeholder')
+    pl_previousGCA = tf.placeholder(shape=[BATCH_SIZE, 1, NUM_UNITS[0]], dtype=tf.float32, name='pl_previousGCA')
 
     # Create the graph of the network
     usePrevGCA = True
@@ -475,9 +510,11 @@ def train(log_file_):
 
     # Trainer - Backward propagation
     # train_step = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
+    # TODO: Find a way to process gradients on losses mean
     if BACKPROP == 'SEQUENCE':
-        train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
-                   for lo in pl_loss_means]
+        pass
+        # train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=pl_loss_means[lo],
+        #                                   var_list=tf.trainable_variables()) for lo in range(GCA_ITERS)]
     else:
         train_steps = [tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss=lo, var_list=tf.trainable_variables())
                    for lo in loss_list]
@@ -518,51 +555,70 @@ def train(log_file_):
         log = ''
 
         # DEBUG - Data loading
-        # imgs, jts, aclasses, bds, tstates = sess.run(next_element)
-        # print('Images:\t\t',imgs.shape)
-        # print('Joints:\t\t',jts.shape)
+        # batch_images, batch_joints, aclasses, batch_bodies, batch_tstates = sess.run(next_element)
+        # print('Images:\t\t',batch_images.shape)
+        # print('Joints:\t\t',batch_joints.shape)
         # print('Classes:\t',aclasses.shape)
-        # print('Bodies:\t\t',bds.shape)
-        # print('TStates:\t',tstates.shape)
+        # print('Bodies:\t\t',batch_bodies.shape)
+        # print('Tstates:\t',batch_tstates.shape)
 
         # Load scene
         try:
-            imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+            batch_data = sess.run(next_element)
+            # batch_images, batch_classes, batch_joints, batch_tstates, batch_bodies, batch_height, batch_width, batch_nbf, batch_fname = sess.run(next_element)
+            batch_images = batch_data[0]
+            batch_classes = batch_data[1]
+            batch_joints = batch_data[2]
+            batch_tstates = batch_data[3]
+            batch_bodies = batch_data[4]
+            batch_height = batch_data[5]
+            batch_width = batch_data[6]
+            batch_nbf = batch_data[7]
+            batch_fname = batch_data[8]
+            print(batch_images.shape, batch_classes.shape, batch_joints.shape, batch_bodies.shape,
+                  batch_height, batch_width, batch_nbf, batch_fname)
         except Exception:
-            print(imgs.shape, ac.shape, jts.shape, bds.shape, h, w, nbf, fname)
+            print(batch_images.shape, batch_classes.shape, batch_joints.shape, batch_bodies.shape,
+                  batch_height, batch_width, batch_nbf, batch_fname)
             warning('Exception raised while reading data')
-        # Pre-process
-        fname = fname if type(fname) == str else fname.decode('UTF-8')
-        ac = np.array(ac) - 1
 
-        if bds.shape[0] != jts.shape[0]:
+        # Detect objects
+        # objects = detect_objects(batch_images)
+
+        # Pre-process
+        for n_, fn_ in enumerate(batch_fname):
+            batch_fname[n_] = fn_ if type(fn_) == str else fn_.decode('UTF-8')
+        # batch_fname = batch_fname if type(batch_fname) == str else batch_fname.decode('UTF-8')
+        batch_classes = np.array(batch_classes) - 1
+
+        if batch_bodies.shape[0] != batch_joints.shape[0]:
             warning('Bodies and joints data have different length (not handled yet)')
             continue
 
         # Convert joints
-        jts = convertJoints(jts)
+        batch_joints = convertJoints(batch_joints)
 
         # DEBUG - Parsing data
-        # jts = np.array(parse_joints(jts, tStates, bds))
-        # print(imgs.shape)
-        # print(h,w,nbf)
-        # print(fname)
-        # print(jts.shape)
-        # print(jts_dict[list(jts_dict.keys())[0]].shape)
-        # print('tStates',tStates.shape, tStates)
-        # print('Bodies', np.array(bds).shape, bds)
-        # print('Classes', ac.shape, ac)
-        # print('Joints', jts.shape, jts)
+        # batch_joints = np.array(parse_joints(batch_joints, batch_tstates, batch_bodies))
+        # print(batch_images.shape)
+        # print(batch_height,batch_width,batch_nbf)
+        # print(batch_fname)
+        # print(batch_joints.shape)
+        # print(batch_joints_dict[list(jts_dict.keys())[0]].shape)
+        # print('batch_tstates',batch_tstates.shape, batch_tstates)
+        # print('Bodies', np.array(batch_bodies).shape, batch_bodies)
+        # print('Classes', batch_classes.shape, batch_classes)
+        # print('Joints', batch_joints.shape, batch_joints)
 
-        print("Iter {}: {} [{},{}] - {}".format(i, fname, w, h, jts.shape))
-        log += "Iter {}: {} [{},{}] - {}\n".format(i, fname, w, h, jts.shape)
+        print("Iter {}: {} [{},{}] - {}".format(i, batch_fname, batch_width, batch_height, batch_joints.shape))
+        log += "Iter {}: {} [{},{}] - {}\n".format(i, batch_fname, batch_width, batch_height, batch_joints.shape)
 
         # For now use only one body
-        if len(jts.shape) == 3:
-            jts = jts.reshape((1,) + jts.shape)
-            # jts = np.swapaxes(jts,0,1)
-            # jts = np.swapaxes(jts, 1, 2)
-        # print(jts.shape)    # shape = (frames,25,batch,3)
+        if len(batch_joints.shape) == 3:
+            batch_joints = batch_joints.reshape((1,) + batch_joints.shape)
+            # batch_joints = np.swapaxes(batch_joints,0,1)
+            # batch_joints = np.swapaxes(batch_joints, 1, 2)
+        # print(batch_joints.shape)    # shape = (frames,25,batch,3)
 
         # Loop vars
         start, end = 0, 1  # size of window
@@ -573,16 +629,16 @@ def train(log_file_):
         prevGCA = np.zeros((1,NUM_UNITS[0]))
         # Generate order (=windows)
         if WINDOW == 'VARIABLE':
-            order = gen_order(ac)
+            order = gen_order(batch_classes)
         elif WINDOW == 'FIXED':
-            order = gen_windows(ac)
+            order = gen_windows(batch_classes)
         # Select all frames sequences label per label
         for start, end in order:
 
             # Window - subset of data
-            indata = jts[:, start:end, :, :]
+            indata = batch_joints[:, start:end, :, :]
             # Ground Truth label
-            gnd = ac[end-1]
+            gnd = batch_classes[end-1]
             gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
             log += 'DEBUG - gt={}'.format(gt)
             # out = sess.run(outputs, feed_dict={inputs: indata})
@@ -628,8 +684,12 @@ def train(log_file_):
         # avg_loss = np.array(losses).mean()
 
         # MINIBATCH backpropagation
+        final_losses = tf.reduce_mean(losses, axis=0)
         if BACKPROP == 'SEQUENCE':
-            _ = sess.run(train_steps, feed_dict={pl_loss_means:avg_loss})
+            for it_ in range(GCA_ITERS):
+                train_op = tf.train.AdamOptimizer().minimize(final_losses[it_])
+                _ = sess.run(train_op)
+            # _ = sess.run(train_steps, feed_dict={pl_loss_means:avg_loss})
 
         # Print Loss and Accuracy and save to log
         line = "AVG Loss = {}\nAccuracy = {}\n".format(avg_loss[-1], accuracy)
@@ -667,8 +727,8 @@ def train(log_file_):
     for dir in os.listdir('weights'):
         if not os.path.isdir('weights/{}'.format(dir)):
             continue
-        if 'Train_' in dir:
-            dir += 1
+        if dir[:6] == 'Train_':
+            nbt += 1
     os.makedirs('weights/Train_{:03d}'.format(nbt))
     for fi in os.listdir('.'):
         if os.path.isfile(fi) and weights_file in fi:
@@ -689,10 +749,16 @@ def test(log_file_):
     # Define variables
     inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, batch, features, channels)
     pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
+    pl_previousGCA = tf.placeholder(shape=[1, NUM_UNITS[0]], dtype=tf.float32, name='pl_previousGCA')
 
     # Define the graph
+    # outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True, useDropout=True)
+
+    # Create the graph of the network
     # TODO: Add args to change ST-LSTM hyperparameters
-    outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True, useDropout=True)
+    usePrevGCA = True
+    outputs, previousGCA = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES,
+                                       usePrevGCA, pl_previousGCA, GCA_ITERS, do_norm=True)
 
     # Create the session
     config = tf.ConfigProto()
@@ -726,50 +792,54 @@ def test(log_file_):
             log = ''
 
             # Load scene
-            imgs, ac, jts, tStates, bds, h, w, nbf, fname = sess.run(next_element)
+            batch_images, batch_classes, batch_joints, batch_tstates, batch_bodies, batch_height, batch_width, batch_nbf, batch_fname = sess.run(next_element)
+
+            # Detect objects
+            # objects = detect_objects(batch_images)
 
             # Pre-process
-            # fname = fname.decode('UTF-8')
-            fname = fname if type(fname) == str else fname.decode('UTF-8')
-            ac = np.array(ac) - 1
+            # batch_fname = batch_fname.decode('UTF-8')
+            batch_fname = batch_fname if type(batch_fname) == str else batch_fname.decode('UTF-8')
+            batch_classes = np.array(batch_classes) - 1
 
-            if bds.shape[0] != jts.shape[0]:
+            if batch_bodies.shape[0] != batch_joints.shape[0]:
                 warning('Bodies and joints data have different length (not handled yet)')
                 continue
 
             # Convert joints
-            jts = convertJoints(jts)
+            batch_joints = convertJoints(batch_joints)
 
-            line = "Iter {}: {} [{},{}] - {}".format(it, fname, w, h, jts.shape)
+            line = "Iter {}: {} [{},{}] - {}".format(it, batch_fname, batch_width, batch_height, batch_joints.shape)
             log += line + "\n"
             print(line)
 
             # For now use only one body
-            if len(jts.shape) == 3:
-                jts = jts.reshape((1,) + jts.shape)
-                # jts = np.swapaxes(jts,0,1)
-                # jts = np.swapaxes(jts, 1, 2)
-            # print(jts.shape)    # shape = (frames,25,batch,3)
+            if len(batch_joints.shape) == 3:
+                batch_joints = batch_joints.reshape((1,) + batch_joints.shape)
+                # batch_joints = np.swapaxes(batch_joints,0,1)
+                # batch_joints = np.swapaxes(batch_joints, 1, 2)
+            # print(batch_joints.shape)    # shape = (frames,25,batch,3)
 
             # Loop vars
             # start, end = 0, 1  # size of window
             accuracy, count = 0.0, 0
+            # Initialize previous GCA
+            prevGCA = np.zeros((1, NUM_UNITS[0]))
             # Generate order (=windows)
             if WINDOW == 'VARIABLE':
-                order = gen_order(ac)
+                order = gen_order(batch_classes)
             elif WINDOW == 'FIXED':
-                order = gen_windows(ac)
+                order = gen_windows(batch_classes)
             # Select all frames sequences label per label
             for start,end in order:
 
                 # Window - subset of data
-                indata = jts[:, start:end, :, :]
+                indata = batch_joints[:, start:end, :, :]
                 # Ground Truth label
-                gnd = ac[end-1]
-                gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
+                gnd = batch_classes[end-1]
 
                 # Inference
-                results = sess.run(outputs, feed_dict={inputs: indata})
+                results, prevGCA = sess.run([outputs, previousGCA], feed_dict={inputs: indata, pl_previousGCA: prevGCA})
                 # print(out)
 
                 # Show predictions
@@ -795,9 +865,9 @@ def test(log_file_):
                 stats = update_stats(stats, class_ids.index(gnd), results[-1])
 
                 # TODO: Make function to show predictions
-                # cv2.imwrite('test/{}.jpg'.format(fname), imgs[0])
-                # video = cv2.VideoWriter('test/{}.avi'.format(fname), 0, 1, (w,h))
-                # for im in imgs:
+                # cv2.imwrite('test/{}.jpg'.format(batch_fname), batch_images[0])
+                # video = cv2.VideoWriter('test/{}.avi'.format(batch_fname), 0, 1, (batch_width,batch_height))
+                # for im in batch_images:
                 #     video.write(im)
                 # video.release()
 
@@ -855,6 +925,8 @@ weights_file = './gca_lstm'
 NB_CLASSES = None
 class_ids = None
 classnames = None
+objects_class_ids = None
+objects_classnames = None
 parse_args()
 
 # Print parameters
@@ -890,16 +962,24 @@ else:
     tfrecord_dataset = tfrecord_dataset.repeat(1)
 # Padded batch
 # tfrecord_dataset = tfrecord_dataset.batch(BATCH_SIZE)
-# pad_shapes = (tf.TensorShape([None, None, CHANNELS]),
-#               tf.TensorShape([None, 25, 3]),
-#               tf.TensorShape([1]),
-#               tf.TensorShape([]),
-#               tf.TensorShape([None, 25]))
+# images, aclasses, joints, trackingStates, bodies, height, width, nb_frames, framename
+pad_shapes = (tf.TensorShape([None, None, None, 3]),         # Images
+              tf.TensorShape([None]),                        # Classes
+              tf.TensorShape([None, 25, 3]),                 # Joints
+              tf.TensorShape([None, 25]),                    # Tracking States
+              tf.TensorShape([None]),                        # Bodies
+              tf.TensorShape([]),                        # Height
+              tf.TensorShape([]),                        # Width
+              tf.TensorShape([]),                        # Number of Frames
+              tf.TensorShape([]))                        # Sequence Name
 # pad_shapes = ([None, None, CHANNELS], [None, 25, 3], [1], [None], [None, 25])
-# tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
+tfrecord_dataset = tfrecord_dataset.padded_batch(BATCH_SIZE, padded_shapes=pad_shapes)
 # Iterator for reading data
 tfrecord_iterator = tfrecord_dataset.make_initializable_iterator()
 next_element = tfrecord_iterator.get_next()
+
+# Initialize Yolov2 Network for inference
+# darknet.performDetect(initOnly=True)
 
 # Create the log file
 log_file = 'logs/log_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S'))
