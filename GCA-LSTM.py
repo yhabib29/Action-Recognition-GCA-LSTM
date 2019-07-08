@@ -30,7 +30,7 @@ JOINTS = 16
 # Joints indexing correspondence table
 GCA_KINECT = [1,20,3,8,9,10,4,5,6,0,16,17,18,12,13,14]
 # Training Mode (WINDOW or SEQUENCE or BATCH)
-BACKPROP = 'SEQUENCE'
+BACKPROP = 'WINDOW'
 # Window size (FIXED=fixed size, VARIABLE= variable size)
 WINDOW = 'FIXED'
 # Window parameter for fixed sized windows
@@ -689,11 +689,14 @@ def test(log_file_):
     # Define variables
     inputs = tf.placeholder(tf.float32, (BATCH_SIZE, None, JOINTS, 3))  # (time, batch, features, channels)
     pl_accuracy = tf.placeholder(shape=[], dtype=tf.float32, name="accuracy_placeholder")
+    pl_previousGCA = tf.placeholder(shape=[1, NUM_UNITS[0]], dtype=tf.float32, name='pl_previousGCA')
 
     # Define the graph
     # TODO: Add args to change ST-LSTM hyperparameters
-    outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True, useDropout=True)
-
+    # outputs = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES, 2, do_norm=True, useDropout=True)
+    usePrevGCA = False
+    outputs, previousGCA = stlstm_loop(NUM_UNITS, inputs, NB_CLASSES,
+                                       usePrevGCA, pl_previousGCA, GCA_ITERS, do_norm=True)
     # Create the session
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -754,6 +757,8 @@ def test(log_file_):
             # Loop vars
             # start, end = 0, 1  # size of window
             accuracy, count = 0.0, 0
+            # Initialize previous GCA
+            prevGCA = np.zeros((1, NUM_UNITS[0]))
             # Generate order (=windows)
             if WINDOW == 'VARIABLE':
                 order = gen_order(ac)
@@ -769,7 +774,7 @@ def test(log_file_):
                 gt = np.reshape(class_ids.index(int(gnd)), (1, 1))
 
                 # Inference
-                results = sess.run(outputs, feed_dict={inputs: indata})
+                results, prevGCA = sess.run([outputs, previousGCA], feed_dict={inputs: indata, pl_previousGCA: prevGCA})
                 # print(out)
 
                 # Show predictions
